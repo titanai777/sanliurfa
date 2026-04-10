@@ -6,7 +6,7 @@
 import type { APIRoute } from 'astro';
 import { queryOne, update } from '../../../lib/postgres';
 import { getTenantBranding, updateTenantBranding, getTenantMembers, logTenantAudit } from '../../../lib/multi-tenant';
-import { apiResponse, apiError, HttpStatus, ErrorCode, getRequestId } from '../../../lib/api';
+import { AppError, apiResponse, apiError, apiErrorFrom, HttpStatus, ErrorCode, ensureUuid, getRequestId, parseJsonBody } from '../../../lib/api';
 import { recordRequest } from '../../../lib/metrics';
 import { logger } from '../../../lib/logging';
 import { deleteCache } from '../../../lib/cache';
@@ -29,6 +29,8 @@ export const GET: APIRoute = async ({ request, locals, params }) => {
         requestId
       );
     }
+
+    ensureUuid(tenantId, 'tenant ID');
 
     // Get tenant (optimized: select common tenant columns)
     const tenant = await queryOne(
@@ -94,6 +96,11 @@ export const GET: APIRoute = async ({ request, locals, params }) => {
       requestId
     );
   } catch (error) {
+    if (error instanceof AppError) {
+      recordRequest('GET', `/api/tenants/${params.tenantId ?? 'unknown'}`, error.statusCode, Date.now() - startTime);
+      return apiErrorFrom(error, requestId);
+    }
+
     const duration = Date.now() - startTime;
     recordRequest('GET', `/api/tenants/${params.tenantId}`, HttpStatus.INTERNAL_SERVER_ERROR, duration);
     logger.error(
@@ -117,7 +124,6 @@ export const PATCH: APIRoute = async ({ request, locals, params }) => {
 
   try {
     const { tenantId } = params;
-    const body = await request.json();
 
     if (!locals.user?.id) {
       recordRequest('PATCH', `/api/tenants/${tenantId}`, HttpStatus.UNAUTHORIZED, Date.now() - startTime);
@@ -125,6 +131,43 @@ export const PATCH: APIRoute = async ({ request, locals, params }) => {
         ErrorCode.AUTH_REQUIRED,
         'Authentication required',
         HttpStatus.UNAUTHORIZED,
+        undefined,
+        requestId
+      );
+    }
+
+    ensureUuid(tenantId, 'tenant ID');
+
+    const parsed = await parseJsonBody(request);
+    if (parsed.error === 'UNSUPPORTED_CONTENT_TYPE') {
+      recordRequest('PATCH', `/api/tenants/${tenantId ?? 'unknown'}`, HttpStatus.BAD_REQUEST, Date.now() - startTime);
+      return apiError(
+        ErrorCode.VALIDATION_ERROR,
+        'Content-Type application/json olmalı',
+        HttpStatus.BAD_REQUEST,
+        { contentType: parsed.contentType },
+        requestId
+      );
+    }
+
+    if (parsed.error === 'INVALID_JSON') {
+      recordRequest('PATCH', `/api/tenants/${tenantId ?? 'unknown'}`, HttpStatus.BAD_REQUEST, Date.now() - startTime);
+      return apiError(
+        ErrorCode.VALIDATION_ERROR,
+        'Geçersiz JSON body',
+        HttpStatus.BAD_REQUEST,
+        undefined,
+        requestId
+      );
+    }
+
+    const body = parsed.body as Record<string, unknown>;
+    if (!body || Array.isArray(body) || typeof body !== 'object') {
+      recordRequest('PATCH', `/api/tenants/${tenantId}`, HttpStatus.BAD_REQUEST, Date.now() - startTime);
+      return apiError(
+        ErrorCode.VALIDATION_ERROR,
+        'Geçersiz JSON body',
+        HttpStatus.BAD_REQUEST,
         undefined,
         requestId
       );
@@ -155,16 +198,44 @@ export const PATCH: APIRoute = async ({ request, locals, params }) => {
       );
     }
 
-    const { name, description, custom_domain, logo_url, favicon_url, branding, settings } = body;
+    const name = typeof body.name === 'string' ? body.name.trim() : undefined;
+    const description = typeof body.description === 'string' ? body.description.trim() : undefined;
+    const customDomain = typeof body.custom_domain === 'string' ? body.custom_domain.trim() : undefined;
+    const logoUrl = typeof body.logo_url === 'string' ? body.logo_url.trim() : undefined;
+    const faviconUrl = typeof body.favicon_url === 'string' ? body.favicon_url.trim() : undefined;
+    const branding = body.branding;
+    const settings = body.settings;
+
+    if (branding !== undefined && (typeof branding !== 'object' || branding === null || Array.isArray(branding))) {
+      recordRequest('PATCH', `/api/tenants/${tenantId}`, HttpStatus.UNPROCESSABLE_ENTITY, Date.now() - startTime);
+      return apiError(
+        ErrorCode.VALIDATION_ERROR,
+        'branding must be an object',
+        HttpStatus.UNPROCESSABLE_ENTITY,
+        undefined,
+        requestId
+      );
+    }
+
+    if (settings !== undefined && (typeof settings !== 'object' || settings === null || Array.isArray(settings))) {
+      recordRequest('PATCH', `/api/tenants/${tenantId}`, HttpStatus.UNPROCESSABLE_ENTITY, Date.now() - startTime);
+      return apiError(
+        ErrorCode.VALIDATION_ERROR,
+        'settings must be an object',
+        HttpStatus.UNPROCESSABLE_ENTITY,
+        undefined,
+        requestId
+      );
+    }
 
     // Update tenant
-    if (name || description || custom_domain || logo_url || favicon_url) {
+    if (name || description || customDomain || logoUrl || faviconUrl) {
       await update('tenants', { id: tenantId }, {
         name: name || tenant.name,
         description: description || tenant.description,
-        custom_domain: custom_domain || tenant.custom_domain,
-        logo_url: logo_url || tenant.logo_url,
-        favicon_url: favicon_url || tenant.favicon_url,
+        custom_domain: customDomain || tenant.custom_domain,
+        logo_url: logoUrl || tenant.logo_url,
+        favicon_url: faviconUrl || tenant.favicon_url,
         updated_at: new Date()
       });
 
@@ -176,12 +247,12 @@ export const PATCH: APIRoute = async ({ request, locals, params }) => {
 
     // Update branding
     if (branding) {
-      await updateTenantBranding(tenantId, branding);
+      await updateTenantBranding(tenantId, branding as Record<string, unknown>);
     }
 
     // Update settings
     if (settings) {
-      await update('tenant_settings', { tenant_id: tenantId }, settings);
+      await update('tenant_settings', { tenant_id: tenantId }, settings as Record<string, unknown>);
     }
 
     // Log audit
@@ -200,6 +271,11 @@ export const PATCH: APIRoute = async ({ request, locals, params }) => {
       requestId
     );
   } catch (error) {
+    if (error instanceof AppError) {
+      recordRequest('PATCH', `/api/tenants/${params.tenantId ?? 'unknown'}`, error.statusCode, Date.now() - startTime);
+      return apiErrorFrom(error, requestId);
+    }
+
     const duration = Date.now() - startTime;
     recordRequest('PATCH', `/api/tenants/${params.tenantId}`, HttpStatus.INTERNAL_SERVER_ERROR, duration);
     logger.error(

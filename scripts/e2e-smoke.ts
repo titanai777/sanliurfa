@@ -2,12 +2,22 @@ import { spawn } from 'node:child_process';
 
 const BASE_URL = process.env.SMOKE_BASE_URL ?? 'http://127.0.0.1:1111';
 const STARTUP_TIMEOUT_MS = 90_000;
+const PERF_P95_BUDGET_MS = Number.parseInt(process.env.SMOKE_MAX_MS ?? '2000', 10);
+
+async function isServerReady(url: string): Promise<boolean> {
+  try {
+    const response = await fetch(url, { method: 'GET' });
+    return response.ok || response.status < 500;
+  } catch {
+    return false;
+  }
+}
 
 function startServer() {
   const command =
     process.platform === 'win32'
-      ? 'npx.cmd astro dev --port 1111 --host 127.0.0.1'
-      : 'npx astro dev --port 1111 --host 127.0.0.1';
+      ? 'npx.cmd astro dev --port 1111 --host 127.0.0.1 --strictPort'
+      : 'npx astro dev --port 1111 --host 127.0.0.1 --strictPort';
   const env = {
     ...process.env,
     DATABASE_URL:
@@ -25,13 +35,8 @@ function startServer() {
 async function waitForServer(url: string): Promise<void> {
   const start = Date.now();
   while (Date.now() - start < STARTUP_TIMEOUT_MS) {
-    try {
-      const response = await fetch(url, { method: 'GET' });
-      if (response.ok || response.status < 500) {
-        return;
-      }
-    } catch {
-      // keep polling
+    if (await isServerReady(url)) {
+      return;
     }
     await new Promise((resolve) => setTimeout(resolve, 1500));
   }
@@ -39,29 +44,50 @@ async function waitForServer(url: string): Promise<void> {
 }
 
 async function assertPath(path: string): Promise<void> {
+  const started = Date.now();
   const response = await fetch(`${BASE_URL}${path}`);
+  const durationMs = Date.now() - started;
   if (response.status >= 500) {
     throw new Error(`Smoke path failed: ${path} -> ${response.status}`);
   }
-  console.log(`smoke-ok ${path} -> ${response.status}`);
+  if (durationMs > PERF_P95_BUDGET_MS) {
+    throw new Error(`Smoke performance budget exceeded: ${path} -> ${durationMs}ms (limit=${PERF_P95_BUDGET_MS}ms)`);
+  }
+  console.log(`smoke-ok ${path} -> ${response.status} (${durationMs}ms)`);
 }
 
 async function main(): Promise<void> {
-  const child = startServer();
+  const readyProbe = `${BASE_URL}/giris`;
+  const reuseExistingServer = await isServerReady(readyProbe);
+  const child = reuseExistingServer ? null : startServer();
   let failed = false;
 
   try {
-    await waitForServer(`${BASE_URL}/giris`);
-    await assertPath('/giris');
-    await assertPath('/kayit');
+    if (!reuseExistingServer) {
+      await waitForServer(readyProbe);
+    }
+    const canaryPaths = [
+      '/',
+      '/giris',
+      '/kayit',
+      '/hakkinda',
+      '/robots.txt',
+      '/api/version',
+      '/api/health',
+      '/api/search/suggestions?prefix=ur&type=places&limit=3',
+    ];
+
+    for (const path of canaryPaths) {
+      await assertPath(path);
+    }
   } catch (error) {
     failed = true;
     throw error;
   } finally {
-    if (!child.killed) {
+    if (child && !child.killed) {
       child.kill('SIGTERM');
     }
-    if (process.platform === 'win32') {
+    if (child && process.platform === 'win32') {
       const killer = spawn('taskkill', ['/pid', String(child.pid), '/f', '/t'], {
         stdio: 'ignore',
         shell: true,

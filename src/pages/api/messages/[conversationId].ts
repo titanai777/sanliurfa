@@ -7,12 +7,47 @@
 
 import type { APIRoute } from 'astro';
 import { getMessages, sendMessage, markConversationRead } from '../../../lib/messages';
-import { queryOne, query } from '../../../lib/postgres';
+import { queryOne } from '../../../lib/postgres';
 import { isUserBlocked } from '../../../lib/blocking';
-import { apiResponse, apiError, HttpStatus, ErrorCode, getRequestId } from '../../../lib/api';
+import { AppError, apiResponse, apiError, apiErrorFrom, HttpStatus, ErrorCode, ensureUuid, getRequestId, parseBoundedInt, parseJsonBody } from '../../../lib/api';
 import { recordRequest } from '../../../lib/metrics';
 import { logger } from '../../../lib/logging';
 import { deleteCache } from '../../../lib/cache';
+
+function parseLimit(rawLimit: string | null): number | null {
+  return parseBoundedInt(rawLimit, { defaultValue: 50, min: 1, max: 100 });
+}
+
+async function parseMessageBody(request: Request, requestId: string, route: string, startTime: number) {
+  const parsed = await parseJsonBody(request);
+  if (parsed.error === 'UNSUPPORTED_CONTENT_TYPE') {
+    recordRequest('POST', route, HttpStatus.BAD_REQUEST, Date.now() - startTime);
+    return {
+      response: apiError(
+        ErrorCode.VALIDATION_ERROR,
+        'Content-Type application/json olmalı',
+        HttpStatus.BAD_REQUEST,
+        { contentType: parsed.contentType },
+        requestId
+      )
+    };
+  }
+
+  if (parsed.error === 'INVALID_JSON') {
+    recordRequest('POST', route, HttpStatus.BAD_REQUEST, Date.now() - startTime);
+    return {
+      response: apiError(
+        ErrorCode.VALIDATION_ERROR,
+        'Geçersiz JSON body',
+        HttpStatus.BAD_REQUEST,
+        undefined,
+        requestId
+      )
+    };
+  }
+
+  return { body: parsed.body };
+}
 
 export const GET: APIRoute = async ({ request, locals, params }) => {
   const requestId = getRequestId({ request } as any);
@@ -22,9 +57,10 @@ export const GET: APIRoute = async ({ request, locals, params }) => {
   try {
     const user = locals.user;
     const { conversationId } = params;
+    const route = `/api/messages/${conversationId ?? 'unknown'}`;
 
     if (!user) {
-      recordRequest('GET', `/api/messages/${conversationId}`, HttpStatus.UNAUTHORIZED, Date.now() - startTime);
+      recordRequest('GET', route, HttpStatus.UNAUTHORIZED, Date.now() - startTime);
       return apiError(
         ErrorCode.AUTH_REQUIRED,
         'Oturum açmanız gerekiyor',
@@ -34,10 +70,27 @@ export const GET: APIRoute = async ({ request, locals, params }) => {
       );
     }
 
+    ensureUuid(conversationId, 'konuşma kimliği');
+
     // Get URL parameters
     const url = new URL(request.url);
-    const limit = Math.min(parseInt(url.searchParams.get('limit') || '50'), 100);
+    const limit = parseLimit(url.searchParams.get('limit'));
     const before = url.searchParams.get('before') || undefined;
+
+    if (limit === null) {
+      recordRequest('GET', route, HttpStatus.BAD_REQUEST, Date.now() - startTime);
+      return apiError(
+        ErrorCode.VALIDATION_ERROR,
+        'limit pozitif bir sayı olmalı',
+        HttpStatus.BAD_REQUEST,
+        undefined,
+        requestId
+      );
+    }
+
+    if (before) {
+      ensureUuid(before, 'before parametresi');
+    }
 
     // Get messages (includes access control check)
     const messages = await getMessages(conversationId, user.id, limit, before);
@@ -46,7 +99,7 @@ export const GET: APIRoute = async ({ request, locals, params }) => {
     await markConversationRead(conversationId, user.id);
 
     const duration = Date.now() - startTime;
-    recordRequest('GET', `/api/messages/${conversationId}`, HttpStatus.OK, duration);
+    recordRequest('GET', route, HttpStatus.OK, duration);
 
     return apiResponse(
       {
@@ -59,9 +112,18 @@ export const GET: APIRoute = async ({ request, locals, params }) => {
       requestId
     );
   } catch (error) {
+    if (error instanceof AppError) {
+      const duration = Date.now() - startTime;
+      recordRequest('GET', `/api/messages/${params.conversationId ?? 'unknown'}`, error.statusCode, duration);
+      return apiErrorFrom(error, requestId);
+    }
+
     const duration = Date.now() - startTime;
-    const statusCode = error instanceof Error && error.message.includes('Access denied') ? HttpStatus.FORBIDDEN : HttpStatus.INTERNAL_SERVER_ERROR;
-    recordRequest('GET', `/api/messages/${params.conversationId}`, statusCode, duration);
+    const statusCode =
+      error instanceof Error && (error.message.includes('Access denied') || error.message.includes('Unauthorized'))
+        ? HttpStatus.FORBIDDEN
+        : HttpStatus.INTERNAL_SERVER_ERROR;
+    recordRequest('GET', `/api/messages/${params.conversationId ?? 'unknown'}`, statusCode, duration);
 
     if (error instanceof Error && error.message.includes('not found')) {
       return apiError(
@@ -73,7 +135,7 @@ export const GET: APIRoute = async ({ request, locals, params }) => {
       );
     }
 
-    if (error instanceof Error && error.message.includes('Access denied')) {
+    if (error instanceof Error && (error.message.includes('Access denied') || error.message.includes('Unauthorized'))) {
       return apiError(
         ErrorCode.FORBIDDEN,
         'Bu konuşmaya erişim izniniz yok',
@@ -102,9 +164,10 @@ export const POST: APIRoute = async ({ request, locals, params }) => {
   try {
     const user = locals.user;
     const { conversationId } = params;
+    const route = `/api/messages/${conversationId ?? 'unknown'}`;
 
     if (!user) {
-      recordRequest('POST', `/api/messages/${conversationId}`, HttpStatus.UNAUTHORIZED, Date.now() - startTime);
+      recordRequest('POST', route, HttpStatus.UNAUTHORIZED, Date.now() - startTime);
       return apiError(
         ErrorCode.AUTH_REQUIRED,
         'Oturum açmanız gerekiyor',
@@ -114,12 +177,18 @@ export const POST: APIRoute = async ({ request, locals, params }) => {
       );
     }
 
-    const body = await request.json();
-    const { content } = body;
+    ensureUuid(conversationId, 'konuşma kimliği');
+
+    const parsed = await parseMessageBody(request, requestId, route, startTime);
+    if (parsed.response) {
+      return parsed.response;
+    }
+
+    const { content } = parsed.body as { content?: unknown };
 
     // Validate input
     if (!content) {
-      recordRequest('POST', `/api/messages/${conversationId}`, HttpStatus.UNPROCESSABLE_ENTITY, Date.now() - startTime);
+      recordRequest('POST', route, HttpStatus.UNPROCESSABLE_ENTITY, Date.now() - startTime);
       return apiError(
         ErrorCode.VALIDATION_ERROR,
         'Mesaj içeriği gereklidir',
@@ -130,7 +199,7 @@ export const POST: APIRoute = async ({ request, locals, params }) => {
     }
 
     if (typeof content !== 'string' || content.trim().length === 0) {
-      recordRequest('POST', `/api/messages/${conversationId}`, HttpStatus.UNPROCESSABLE_ENTITY, Date.now() - startTime);
+      recordRequest('POST', route, HttpStatus.UNPROCESSABLE_ENTITY, Date.now() - startTime);
       return apiError(
         ErrorCode.VALIDATION_ERROR,
         'Mesaj boş olamaz',
@@ -141,7 +210,7 @@ export const POST: APIRoute = async ({ request, locals, params }) => {
     }
 
     if (content.length > 5000) {
-      recordRequest('POST', `/api/messages/${conversationId}`, HttpStatus.UNPROCESSABLE_ENTITY, Date.now() - startTime);
+      recordRequest('POST', route, HttpStatus.UNPROCESSABLE_ENTITY, Date.now() - startTime);
       return apiError(
         ErrorCode.VALIDATION_ERROR,
         'Mesaj çok uzun (maksimum 5000 karakter)',
@@ -158,11 +227,23 @@ export const POST: APIRoute = async ({ request, locals, params }) => {
     );
 
     if (!conversation) {
-      recordRequest('POST', `/api/messages/${conversationId}`, HttpStatus.NOT_FOUND, Date.now() - startTime);
+      recordRequest('POST', route, HttpStatus.NOT_FOUND, Date.now() - startTime);
       return apiError(
         ErrorCode.NOT_FOUND,
         'Konuşma bulunamadı',
         HttpStatus.NOT_FOUND,
+        undefined,
+        requestId
+      );
+    }
+
+    const isParticipant = conversation.participant_a === user.id || conversation.participant_b === user.id;
+    if (!isParticipant) {
+      recordRequest('POST', route, HttpStatus.FORBIDDEN, Date.now() - startTime);
+      return apiError(
+        ErrorCode.FORBIDDEN,
+        'Bu konuşmaya erişim izniniz yok',
+        HttpStatus.FORBIDDEN,
         undefined,
         requestId
       );
@@ -174,7 +255,7 @@ export const POST: APIRoute = async ({ request, locals, params }) => {
     // Check if sender is blocked by recipient
     const isBlocked = await isUserBlocked(recipientId, user.id);
     if (isBlocked) {
-      recordRequest('POST', `/api/messages/${conversationId}`, HttpStatus.FORBIDDEN, Date.now() - startTime);
+      recordRequest('POST', route, HttpStatus.FORBIDDEN, Date.now() - startTime);
       return apiError(
         ErrorCode.FORBIDDEN,
         'Bu kullanıcı mesaj almıyor. Sizi engellemiş olabilir.',
@@ -188,7 +269,7 @@ export const POST: APIRoute = async ({ request, locals, params }) => {
     const message = await sendMessage(conversationId, user.id, content.trim());
 
     const duration = Date.now() - startTime;
-    recordRequest('POST', `/api/messages/${conversationId}`, HttpStatus.CREATED, duration);
+    recordRequest('POST', route, HttpStatus.CREATED, duration);
     logger.logMutation('create', 'direct_messages', message.id, user.id, { conversationId });
 
     return apiResponse(
@@ -200,9 +281,18 @@ export const POST: APIRoute = async ({ request, locals, params }) => {
       requestId
     );
   } catch (error) {
+    if (error instanceof AppError) {
+      const duration = Date.now() - startTime;
+      recordRequest('POST', `/api/messages/${params.conversationId ?? 'unknown'}`, error.statusCode, duration);
+      return apiErrorFrom(error, requestId);
+    }
+
     const duration = Date.now() - startTime;
-    const statusCode = error instanceof Error && error.message.includes('Access denied') ? HttpStatus.FORBIDDEN : HttpStatus.INTERNAL_SERVER_ERROR;
-    recordRequest('POST', `/api/messages/${params.conversationId}`, statusCode, duration);
+    const statusCode =
+      error instanceof Error && (error.message.includes('Access denied') || error.message.includes('Unauthorized'))
+        ? HttpStatus.FORBIDDEN
+        : HttpStatus.INTERNAL_SERVER_ERROR;
+    recordRequest('POST', `/api/messages/${params.conversationId ?? 'unknown'}`, statusCode, duration);
 
     if (error instanceof Error && error.message.includes('not found')) {
       return apiError(
@@ -214,7 +304,7 @@ export const POST: APIRoute = async ({ request, locals, params }) => {
       );
     }
 
-    if (error instanceof Error && error.message.includes('Access denied')) {
+    if (error instanceof Error && (error.message.includes('Access denied') || error.message.includes('Unauthorized'))) {
       return apiError(
         ErrorCode.FORBIDDEN,
         'Bu konuşmaya erişim izniniz yok',
@@ -243,9 +333,10 @@ export const DELETE: APIRoute = async ({ request, locals, params }) => {
   try {
     const user = locals.user;
     const { conversationId } = params;
+    const route = `/api/messages/${conversationId ?? 'unknown'}`;
 
     if (!user) {
-      recordRequest('DELETE', `/api/messages/${conversationId}`, HttpStatus.UNAUTHORIZED, Date.now() - startTime);
+      recordRequest('DELETE', route, HttpStatus.UNAUTHORIZED, Date.now() - startTime);
       return apiError(
         ErrorCode.AUTH_REQUIRED,
         'Oturum açmanız gerekiyor',
@@ -255,6 +346,8 @@ export const DELETE: APIRoute = async ({ request, locals, params }) => {
       );
     }
 
+    ensureUuid(conversationId, 'konuşma kimliği');
+
     // Verify user is participant (soft delete via archive table concept)
     const conversation = await queryOne(
       'SELECT * FROM conversations WHERE id = $1',
@@ -262,7 +355,7 @@ export const DELETE: APIRoute = async ({ request, locals, params }) => {
     );
 
     if (!conversation) {
-      recordRequest('DELETE', `/api/messages/${conversationId}`, HttpStatus.NOT_FOUND, Date.now() - startTime);
+      recordRequest('DELETE', route, HttpStatus.NOT_FOUND, Date.now() - startTime);
       return apiError(
         ErrorCode.NOT_FOUND,
         'Konuşma bulunamadı',
@@ -274,7 +367,7 @@ export const DELETE: APIRoute = async ({ request, locals, params }) => {
 
     const isParticipant = conversation.participant_a === user.id || conversation.participant_b === user.id;
     if (!isParticipant) {
-      recordRequest('DELETE', `/api/messages/${conversationId}`, HttpStatus.FORBIDDEN, Date.now() - startTime);
+      recordRequest('DELETE', route, HttpStatus.FORBIDDEN, Date.now() - startTime);
       return apiError(
         ErrorCode.FORBIDDEN,
         'Bu konuşmaya erişim izniniz yok',
@@ -289,7 +382,7 @@ export const DELETE: APIRoute = async ({ request, locals, params }) => {
     await deleteCache(`sanliurfa:messages:inbox:${user.id}`);
 
     const duration = Date.now() - startTime;
-    recordRequest('DELETE', `/api/messages/${conversationId}`, HttpStatus.OK, duration);
+    recordRequest('DELETE', route, HttpStatus.OK, duration);
     logger.logMutation('delete', 'conversations', conversationId, user.id);
 
     return apiResponse(
@@ -301,8 +394,14 @@ export const DELETE: APIRoute = async ({ request, locals, params }) => {
       requestId
     );
   } catch (error) {
+    if (error instanceof AppError) {
+      const duration = Date.now() - startTime;
+      recordRequest('DELETE', `/api/messages/${params.conversationId ?? 'unknown'}`, error.statusCode, duration);
+      return apiErrorFrom(error, requestId);
+    }
+
     const duration = Date.now() - startTime;
-    recordRequest('DELETE', `/api/messages/${params.conversationId}`, HttpStatus.INTERNAL_SERVER_ERROR, duration);
+    recordRequest('DELETE', `/api/messages/${params.conversationId ?? 'unknown'}`, HttpStatus.INTERNAL_SERVER_ERROR, duration);
     logger.error('Delete conversation failed', error instanceof Error ? error : new Error(String(error)));
     return apiError(
       ErrorCode.INTERNAL_ERROR,

@@ -88,7 +88,10 @@ sanliurfa/
 
 ```bash
 npm run test:unit
+npm run test:critical
 npm run test:e2e
+npm run test:regression:unit
+npm run test:regression:e2e
 npm run phase:sync:tsconfig
 npm run test:phase:range -- 947-952
 npm run test:phase:batch -- 947-952 953-958 959-964
@@ -98,15 +101,31 @@ npm run phase:doctor
 npm run phase:changelog:normalize
 npm run test:unit -- src/lib/__tests__/report-engine-excel-smoke.test.ts
 npm run repo:stabilize:check
+npm run security:secrets:scan
+npm run governance:imports:check
+npm run db:drift:check
+npm run db:test:bootstrap
+npm run env:contract:check
+npm run env:contract:check:ci
+npm run migrate:status
+npm run migrate:dry-run
+npm run typecheck:app
 npm run release:gate
+npm run script:surface:budget:check
+npm run observability:critical:check
+npm run performance:budget:check
 npm run test:e2e:smoke
+npm run test:e2e:full
 ```
 
 ## Release ve Stabilizasyon
 - API geçiş politikası: `docs/API_LEGACY_POLICY.md`
 - Repo stabilizasyon runbook: `docs/REPO_STABILIZATION_RUNBOOK.md`
 - Release gate: `docs/RELEASE_GATES.md`
+- Live status snapshot: `docs/STATUS_LIVE.md`
 - Webhook güvenlik politikası: `docs/WEBHOOK_SECURITY_POLICY.md`
+- Script envanteri ve deprecate politikası: `docs/SCRIPT_INVENTORY.md`
+- Experimental typecheck kapanış planı: `docs/TYPECHECK_EXPERIMENTAL_BACKLOG.md`
 - 7 günlük uygulama planı: `docs/SEVEN_DAY_EXECUTION_PLAN.md`
 
 ## Clean Worktree Politikası
@@ -133,10 +152,16 @@ npm run test:e2e:smoke
 
 ## Astro Operasyon Notları
 - Repo SSR-first çalışır: `output: "server"` ve `@astrojs/node` adapter.
+- `npm run dev:1111` öncesi port temizliği otomatik yapılır (`scripts/ensure-port-free.ps1`) ve `--strictPort` kullanılır.
 - Route collision üretmeyin: `src/pages/x.ts` ile `src/pages/x/index.ts` aynı anda yaşamamalı.
 - Content collection değişikliklerinde `src/content.config.ts` ve `src/content/` birlikte ele alınmalı.
 - PWA build çıktısında service worker dosyası `sw.js` olarak üretilir; build araçlarını buna göre konfigüre edin.
 - `import.meta.env` kullanan bundled scriptleri keyfi `is:inline` yapmayın.
+
+## Typecheck Scope Ayrımı
+- `tsconfig.app.json`: merge-blocking kritik runtime/gate yüzeyi.
+- `tsconfig.experimental.json`: geniş/deneysel modül alanı.
+- CI blocking typecheck `npm run typecheck:app` ile yapılır.
 
 ## PR Politikası
 - `master` korumalıdır; doğrudan push yapılmaz.

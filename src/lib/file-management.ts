@@ -3,10 +3,9 @@
  * S3 uploads, CDN caching, file variants, access tracking
  */
 
-import { queryOne, queryMany, insert, update } from './postgres';
+import { queryOne, queryRows, insert, update } from './postgres';
 import { logger } from './logging';
 import { getCache, setCache, deleteCache } from './cache';
-import crypto from 'crypto';
 
 interface S3File {
   id: string;
@@ -77,7 +76,7 @@ export async function getUserFiles(userId: string, limit: number = 50): Promise<
       return JSON.parse(cached);
     }
 
-    const files = await queryMany(
+    const files = await queryRows(
       'SELECT * FROM s3_files WHERE uploaded_by_user_id = $1 AND is_archived = false ORDER BY created_at DESC LIMIT $2',
       [userId, limit]
     );
@@ -112,7 +111,7 @@ export async function getFileAccessStats(fileId: string, days: number = 30): Pro
   try {
     const since = new Date(Date.now() - days * 24 * 3600000);
 
-    const stats = await queryMany(
+    const stats = await queryRows(
       `SELECT COUNT(*) as total_accesses, COUNT(DISTINCT user_id) as unique_users, COUNT(DISTINCT ip_address) as unique_ips
        FROM file_access_logs
        WHERE file_id = $1 AND accessed_at >= $2`,
@@ -153,7 +152,7 @@ export async function getFileVariants(fileId: string): Promise<any[]> {
       return JSON.parse(cached);
     }
 
-    const variants = await queryMany(
+    const variants = await queryRows(
       'SELECT * FROM file_variants WHERE original_file_id = $1 ORDER BY variant_type ASC',
       [fileId]
     );
@@ -234,13 +233,12 @@ export async function scanFileVirus(fileId: string): Promise<boolean> {
   }
 }
 
-export function generateUploadSignature(bucket: string, key: string, expiresInSeconds: number = 3600): any {
-  // In production, use AWS SDK to generate signed URL
-  // This is a placeholder
+export function buildManagedFileUrls(publicUrl: string, storageProvider: 'local' | 'supabase' | 's3' = 'local') {
   return {
-    bucket: bucket,
-    key: key,
-    signed_url: `https://${bucket}.s3.amazonaws.com/${key}?expires=${Date.now() + expiresInSeconds * 1000}`,
-    expires_at: new Date(Date.now() + expiresInSeconds * 1000)
+    storage_provider: storageProvider,
+    upload_mode: 'server-managed',
+    public_url: publicUrl,
+    s3_url: publicUrl,
+    cdn_url: publicUrl
   };
 }

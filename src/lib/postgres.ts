@@ -237,19 +237,19 @@ export async function queryStream(text: string, params?: any[], onRow?: (row: an
     }));
 
     return new Promise<number>((resolve, reject) => {
-      query.on('row', async (row) => {
+      query.on('row', async (row: any) => {
         rowCount++;
         if (onRow) {
           try {
             await onRow(row);
-          } catch (err) {
-            logger.error('Row processing error in stream', err);
+          } catch (err: unknown) {
+            logger.error('Row processing error in stream', err instanceof Error ? err : new Error(String(err)));
           }
         }
       });
 
-      query.on('error', (err) => {
-        logger.error('Stream query error', err);
+      query.on('error', (err: unknown) => {
+        logger.error('Stream query error', err instanceof Error ? err : new Error(String(err)));
         reject(err);
       });
 
@@ -272,18 +272,11 @@ export async function queryOne(text: string, params?: any[]) {
 }
 
 /**
- * Execute a query and return all rows
- * Phase 5: Optional streaming for large result sets
+ * Official helper for callers that want a plain rows array.
  */
-export async function queryMany(text: string, params?: any[], options?: { stream?: boolean; onRow?: (row: any) => Promise<void> }) {
-  if (options?.stream && options?.onRow) {
-    // Use streaming for large datasets
-    const rowCount = await queryStream(text, params, options.onRow);
-    return { rowCount, streamed: true };
-  }
-
+export async function queryRows<T = any>(text: string, params?: any[]): Promise<T[]> {
   const result = await query(text, params);
-  return result.rows;
+  return result.rows as T[];
 }
 
 /**
@@ -325,6 +318,10 @@ const ALLOWED_TABLES = new Set([
   'categories',
   'tags',
   'messages',
+  'memberships',
+  'subscriptions',
+  'billing_history',
+  'vendor_profiles',
   'points_history',
   'badges',
   'user_badges',
@@ -346,7 +343,9 @@ const ALLOWED_TABLES = new Set([
   // Phase 28D: Real-time Analytics
   'request_metrics',
   'query_metrics',
-  'performance_metrics'
+  'performance_metrics',
+  'onboarding_progress',
+  'user_reputation'
 ]);
 
 /**
@@ -392,7 +391,7 @@ export async function getBySlug(table: string, slug: string) {
  * Insert a new row
  * WARNING: Column names are interpolated. Only use with trusted/validated column names.
  */
-export async function insert(table: string, data: Record<string, any>) {
+export async function insert(table: string, data: Record<string, any>, _legacyReturningFlag?: boolean) {
   assertTable(table);
   const keys = Object.keys(data);
   const values = Object.values(data);
@@ -410,7 +409,12 @@ export async function insert(table: string, data: Record<string, any>) {
  * Update a row by ID
  * WARNING: Column names are interpolated. Only use with trusted/validated column names.
  */
-export async function update(table: string, id: string, data: Record<string, any>) {
+export async function update(
+  table: string,
+  idOrWhere: string | Record<string, any>,
+  data: Record<string, any>,
+  idColumn: string = 'id'
+) {
   assertTable(table);
   const keys = Object.keys(data);
   const values = Object.values(data);
@@ -420,7 +424,26 @@ export async function update(table: string, id: string, data: Record<string, any
   }
 
   const setClause = keys.map((k, i) => `${k} = $${i + 2}`).join(', ');
-  const result = await queryOne(`UPDATE ${table} SET ${setClause} WHERE id = $1 RETURNING *`, [id, ...values]);
+  let whereClause = `${idColumn} = $1`;
+  let whereParams: any[] = [];
+
+  if (typeof idOrWhere === 'string') {
+    whereParams = [idOrWhere];
+  } else {
+    const whereEntries = Object.entries(idOrWhere);
+    if (whereEntries.length === 0) {
+      throw new Error('No where condition provided');
+    }
+    whereClause = whereEntries
+      .map(([column], idx) => `${column} = $${idx + 1}`)
+      .join(' AND ');
+    whereParams = whereEntries.map(([, value]) => value);
+  }
+
+  const result = await queryOne(
+    `UPDATE ${table} SET ${setClause} WHERE ${whereClause} RETURNING *`,
+    [...whereParams, ...values]
+  );
   return result;
 }
 
@@ -432,53 +455,5 @@ export async function remove(table: string, id: string) {
   await query(`DELETE FROM ${table} WHERE id = $1`, [id]);
   return { success: true };
 }
-
-// Compatibility alias for modules importing `delete` from this module.
-export { remove as delete };
-
-// ==================== BACKWARD COMPATIBILITY ====================
-
-/**
- * Supabase API shim for backward compatibility
- */
-export const db = {
-  from: (table: string) => ({
-    select: async (columns = '*') => {
-      assertTable(table);
-      const result = await query(`SELECT ${columns} FROM ${table}`);
-      return { data: result.rows, error: null };
-    },
-    selectOne: async (columns = '*') => {
-      assertTable(table);
-      const result = await queryOne(`SELECT ${columns} FROM ${table}`);
-      return { data: result, error: null };
-    },
-    eq: async (column: string, value: any) => {
-      assertTable(table);
-      const result = await query(`SELECT * FROM ${table} WHERE ${column} = $1`, [value]);
-      return { data: result.rows, error: null };
-    },
-    eqOne: async (column: string, value: any) => {
-      assertTable(table);
-      const result = await queryOne(`SELECT * FROM ${table} WHERE ${column} = $1`, [value]);
-      return { data: result, error: null };
-    },
-    insert: async (data: any) => {
-      const result = await insert(table, data);
-      return { data: result, error: null };
-    },
-    update: async (data: any) => {
-      if (data.id) {
-        const { id, ...rest } = data;
-        const result = await update(table, id, rest);
-        return { data: result, error: null };
-      }
-      return { data: null, error: { message: 'ID required' } };
-    },
-    delete: async () => {
-      return { data: null, error: { message: 'Use remove() instead' } };
-    }
-  })
-};
 
 export default pool;

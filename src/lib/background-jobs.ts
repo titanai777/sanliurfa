@@ -3,6 +3,7 @@
  * Supports email sending, notifications, reports, etc.
  */
 
+import { randomUUID } from 'crypto';
 import { getCache, setCache } from './cache';
 import { logger } from './logging';
 
@@ -265,7 +266,7 @@ export class BackgroundJobQueue {
    * Generate job ID
    */
   private generateId(): string {
-    return `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    return `job_${randomUUID()}`;
   }
 }
 
@@ -339,10 +340,10 @@ function setupDefaultHandlers(queue: BackgroundJobQueue): void {
   // Send scheduled campaigns
   queue.registerHandler(JobTypes.SEND_SCHEDULED_CAMPAIGNS, async (payload) => {
     try {
-      const { queryMany, update } = await import('./postgres');
+      const { queryRows, update } = await import('./postgres');
 
       // Get campaigns scheduled for now
-      const scheduledCampaigns = await queryMany(
+      const scheduledCampaigns = await queryRows(
         'SELECT id FROM email_campaigns WHERE status = $1 AND scheduled_at <= NOW()',
         ['scheduled']
       );

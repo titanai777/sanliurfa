@@ -3,11 +3,12 @@
  * Handles user notification preferences
  */
 
-import { queryOne, queryMany, update } from './postgres';
+import { queryOne, update } from './postgres';
 import { logger } from './logging';
+import type { EmailNotificationType } from './notification-types';
 
 export type NotificationChannel = 'email' | 'in_app' | 'push';
-export type NotificationType = 'review_response' | 'new_review' | 'weekly_summary' | 'promotional' | 'account_changes';
+export type NotificationType = EmailNotificationType;
 
 export interface EmailPreferences {
   userId: string;

@@ -1,11 +1,17 @@
 import type { APIRoute } from 'astro';
 import { apiResponse, apiError, HttpStatus, ErrorCode, getRequestId } from '../../../lib/api';
+import { classifyOverallOpsStatus, classifyThresholdStatus } from '../../../lib/admin-status';
 import { pool } from '../../../lib/postgres';
 import { getRedisClient, isRedisAvailable } from '../../../lib/cache';
-import { query } from '../../../lib/postgres';
+import {
+  getArtifactHealthSnapshot,
+  summarizeArtifactHealth,
+  type ArtifactHealthSummary,
+  type RuntimeArtifactHealthSnapshot
+} from '../../../lib/artifact-health';
 
 interface DetailedHealth {
-  status: 'healthy' | 'degraded' | 'unhealthy';
+  status: 'healthy' | 'degraded' | 'blocked';
   uptime: number;
   timestamp: string;
   version: string;
@@ -36,6 +42,8 @@ interface DetailedHealth {
       responseTime?: number;
       error?: string;
     };
+    artifacts: RuntimeArtifactHealthSnapshot;
+    artifactSummary: ArtifactHealthSummary;
   };
 }
 
@@ -57,6 +65,8 @@ export const GET: APIRoute = async ({ request, locals }) => {
     let redisStatus: 'up' | 'down' = 'down';
     let redisResponseTime = 0;
     let redisError: string | undefined;
+    const artifactHealth = await getArtifactHealthSnapshot();
+    const artifactHealthSummary = summarizeArtifactHealth(artifactHealth);
 
     // Check database
     try {
@@ -91,13 +101,16 @@ export const GET: APIRoute = async ({ request, locals }) => {
     const memUsage = process.memoryUsage();
     const cpuUsage = process.cpuUsage();
 
-    // Determine overall status
-    let overallStatus: 'healthy' | 'degraded' | 'unhealthy' = 'healthy';
-    if (dbStatus === 'down') {
-      overallStatus = 'unhealthy';
-    } else if (redisStatus === 'down') {
-      overallStatus = 'degraded';
-    }
+    const overallStatus = classifyOverallOpsStatus([
+      classifyThresholdStatus({
+        blockedWhen: dbStatus === 'down',
+        degradedWhen: false
+      }),
+      classifyThresholdStatus({
+        blockedWhen: false,
+        degradedWhen: redisStatus === 'down'
+      })
+    ]);
 
     const uptime = Math.floor(process.uptime());
 
@@ -130,11 +143,13 @@ export const GET: APIRoute = async ({ request, locals }) => {
           status: redisStatus,
           ...(redisResponseTime && { responseTime: redisResponseTime }),
           ...(redisError && { error: redisError })
-        }
+        },
+        artifacts: artifactHealth,
+        artifactSummary: artifactHealthSummary
       }
     };
 
-    const statusCode = overallStatus === 'unhealthy' ? HttpStatus.SERVICE_UNAVAILABLE : HttpStatus.OK;
+    const statusCode = overallStatus === 'blocked' ? HttpStatus.SERVICE_UNAVAILABLE : HttpStatus.OK;
 
     return apiResponse(healthData, statusCode, requestId);
   } catch (error) {

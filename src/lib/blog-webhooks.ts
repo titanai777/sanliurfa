@@ -4,8 +4,9 @@
  * Abone sistemi, analytics, sosyal medya entegrasyonu için
  */
 
-import { queryMany } from './postgres';
+import { randomUUID } from 'crypto';
 import { logger } from './logging';
+import { fetchWithTimeout } from './http';
 
 export interface WebhookEvent {
   type: 'post.published' | 'post.updated' | 'post.deleted' | 'comment.approved';
@@ -107,10 +108,7 @@ async function sendWebhooks(event: WebhookEvent): Promise<void> {
 async function sendWebhook(url: string, event: WebhookEvent, retries = 3): Promise<void> {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 10000);
-
-      const response = await fetch(url, {
+      const response = await fetchWithTimeout(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -118,11 +116,8 @@ async function sendWebhook(url: string, event: WebhookEvent, retries = 3): Promi
           'X-Webhook-ID': generateId(),
           'User-Agent': 'Sanliurfa-Blog-Webhook/1.0'
         },
-        body: JSON.stringify(event),
-        signal: controller.signal
-      });
-
-      clearTimeout(timeout);
+        body: JSON.stringify(event)
+      }, 10000);
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
@@ -164,7 +159,7 @@ function generateSignature(event: WebhookEvent): string {
  * Webhook ID oluştur
  */
 function generateId(): string {
-  return `wh_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  return `wh_${randomUUID()}`;
 }
 
 /**

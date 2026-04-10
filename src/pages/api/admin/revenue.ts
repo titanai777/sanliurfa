@@ -1,9 +1,10 @@
 import type { APIRoute } from 'astro';
-import { queryOne, queryMany } from '../../../lib/postgres';
+import { queryOne, queryRows } from '../../../lib/postgres';
 import { verifyToken } from '../../../lib/auth';
 import { apiResponse, apiError, HttpStatus, ErrorCode, getRequestId } from '../../../lib/api';
 import { recordRequest } from '../../../lib/metrics';
 import { logger } from '../../../lib/logging';
+import { hasPermission } from '../../../lib/rbac';
 
 export const GET: APIRoute = async ({ request, cookies }) => {
   const requestId = getRequestId({ request } as any);
@@ -24,11 +25,14 @@ export const GET: APIRoute = async ({ request, cookies }) => {
       return apiError(ErrorCode.AUTH_REQUIRED, 'Invalid or expired token', HttpStatus.UNAUTHORIZED, undefined, requestId);
     }
 
-    // Check admin role (would be done via RBAC, for now check if role includes admin)
-    // In real implementation: await hasPermission(sessionData.userId, 'admin.access')
+    const canAccessRevenue = sessionData.role === 'admin' || await hasPermission(sessionData.userId, 'admin.access');
+    if (!canAccessRevenue) {
+      recordRequest('GET', '/api/admin/revenue', HttpStatus.FORBIDDEN, Date.now() - startTime);
+      return apiError(ErrorCode.FORBIDDEN, 'Admin access required', HttpStatus.FORBIDDEN, undefined, requestId);
+    }
 
     // Get current active subscriptions by tier
-    const subscriptionsByTier = await queryMany(
+    const subscriptionsByTier = await queryRows(
       `SELECT tier, COUNT(*) as count
        FROM memberships
        WHERE status = 'active'
@@ -36,7 +40,7 @@ export const GET: APIRoute = async ({ request, cookies }) => {
     );
 
     // Calculate MRR (Monthly Recurring Revenue)
-    const mrrQuery = await queryMany(
+    const mrrQuery = await queryRows(
       `SELECT
         tier,
         COUNT(*) as subscriber_count,
@@ -62,7 +66,7 @@ export const GET: APIRoute = async ({ request, cookies }) => {
     }
 
     // Get daily revenue for last 30 days
-    const dailyRevenue = await queryMany(
+    const dailyRevenue = await queryRows(
       `SELECT
         DATE(started_at) as date,
         CASE

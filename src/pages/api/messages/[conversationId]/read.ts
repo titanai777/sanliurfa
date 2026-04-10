@@ -6,7 +6,7 @@
 
 import type { APIRoute } from 'astro';
 import { markConversationRead } from '../../../../lib/messages';
-import { apiResponse, apiError, HttpStatus, ErrorCode, getRequestId } from '../../../../lib/api';
+import { AppError, apiResponse, apiError, apiErrorFrom, HttpStatus, ErrorCode, ensureUuid, getRequestId } from '../../../../lib/api';
 import { recordRequest } from '../../../../lib/metrics';
 import { logger } from '../../../../lib/logging';
 
@@ -30,6 +30,8 @@ export const POST: APIRoute = async ({ request, locals, params }) => {
       );
     }
 
+    ensureUuid(conversationId, 'konuşma kimliği');
+
     // Mark conversation as read (includes access control check)
     await markConversationRead(conversationId, user.id);
 
@@ -45,6 +47,12 @@ export const POST: APIRoute = async ({ request, locals, params }) => {
       requestId
     );
   } catch (error) {
+    if (error instanceof AppError) {
+      const duration = Date.now() - startTime;
+      recordRequest('POST', `/api/messages/${params.conversationId ?? 'unknown'}/read`, error.statusCode, duration);
+      return apiErrorFrom(error, requestId);
+    }
+
     const duration = Date.now() - startTime;
     const statusCode = error instanceof Error && error.message.includes('Access denied') ? HttpStatus.FORBIDDEN : HttpStatus.INTERNAL_SERVER_ERROR;
     recordRequest('POST', `/api/messages/${params.conversationId}/read`, statusCode, duration);

@@ -1,5 +1,7 @@
 // Structured logging with request ID tracking
 
+let requestIdFallbackCounter = 0;
+
 enum LogLevel {
   DEBUG = 'debug',
   INFO = 'info',
@@ -21,6 +23,8 @@ interface LogEntry {
   duration?: number;
 }
 
+export type LogContext = Record<string, any>;
+
 /**
  * Generate a unique request ID for tracking
  */
@@ -28,12 +32,35 @@ export function generateRequestId(): string {
   if (typeof globalThis.crypto?.randomUUID === 'function') {
     return globalThis.crypto.randomUUID();
   }
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  requestIdFallbackCounter += 1;
+  return `${Date.now()}-${requestIdFallbackCounter}`;
 }
 
 class Logger {
   private isDevelopment = Boolean((import.meta as { env?: { DEV?: boolean } }).env?.DEV);
   private requestId: string | undefined;
+
+  private normalizeArgs(
+    maybeErrorOrContext?: Error | string | LogContext,
+    maybeContext?: LogContext
+  ): { errorData?: { message: string; stack?: string }; context?: LogContext } {
+    if (
+      maybeErrorOrContext &&
+      typeof maybeErrorOrContext === 'object' &&
+      !(maybeErrorOrContext instanceof Error)
+    ) {
+      return { context: maybeErrorOrContext };
+    }
+
+    const errorData =
+      typeof maybeErrorOrContext === 'string'
+        ? { message: maybeErrorOrContext }
+        : maybeErrorOrContext instanceof Error
+        ? { message: maybeErrorOrContext.message, stack: maybeErrorOrContext.stack }
+        : undefined;
+
+    return { errorData, context: maybeContext };
+  }
 
   setRequestId(id: string): void {
     this.requestId = id;
@@ -97,24 +124,23 @@ class Logger {
     }
   }
 
-  debug(message: string, context?: Record<string, any>) {
-    this.log({ level: LogLevel.DEBUG, message, context, timestamp: new Date().toISOString() });
+  debug(message: string, maybeErrorOrContext?: Error | string | LogContext, maybeContext?: LogContext) {
+    const { errorData, context } = this.normalizeArgs(maybeErrorOrContext, maybeContext);
+    this.log({ level: LogLevel.DEBUG, message, error: errorData, context, timestamp: new Date().toISOString() });
   }
 
-  info(message: string, context?: Record<string, any>) {
-    this.log({ level: LogLevel.INFO, message, context, timestamp: new Date().toISOString() });
+  info(message: string, maybeErrorOrContext?: Error | string | LogContext, maybeContext?: LogContext) {
+    const { errorData, context } = this.normalizeArgs(maybeErrorOrContext, maybeContext);
+    this.log({ level: LogLevel.INFO, message, error: errorData, context, timestamp: new Date().toISOString() });
   }
 
-  warn(message: string, context?: Record<string, any>) {
-    this.log({ level: LogLevel.WARN, message, context, timestamp: new Date().toISOString() });
+  warn(message: string, maybeErrorOrContext?: Error | string | LogContext, maybeContext?: LogContext) {
+    const { errorData, context } = this.normalizeArgs(maybeErrorOrContext, maybeContext);
+    this.log({ level: LogLevel.WARN, message, error: errorData, context, timestamp: new Date().toISOString() });
   }
 
-  error(message: string, error?: Error | string, context?: Record<string, any>) {
-    const errorData = typeof error === 'string'
-      ? { message: error }
-      : error
-      ? { message: error.message, stack: error.stack }
-      : undefined;
+  error(message: string, maybeErrorOrContext?: Error | string | LogContext, maybeContext?: LogContext) {
+    const { errorData, context } = this.normalizeArgs(maybeErrorOrContext, maybeContext);
 
     this.log({
       level: LogLevel.ERROR,

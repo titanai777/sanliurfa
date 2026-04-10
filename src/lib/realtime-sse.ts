@@ -43,15 +43,25 @@ interface RealtimeData {
 }
 
 class RealtimeManager {
+  private static readonly MAX_LISTENERS_PER_EVENT = 25;
   private eventSource: EventSource | null = null;
   private messageEventSource: EventSource | null = null;
   private notificationEventSource: EventSource | null = null;
   private analyticsEventSource: EventSource | null = null;
   private feedEventSource: EventSource | null = null;
+  private presenceReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private messageReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private notificationReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private analyticsReconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private feedReconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private listeners: Map<string, Set<Function>> = new Map();
   private onlineUsers = 0;
   private unreadCount = 0;
   private notificationCount = 0;
+  private latestNotifications: Notification[] = [];
+  private latestAnalyticsMetrics: RealtimeData['metricsPayload'] | null = null;
+  private latestAnalyticsKPI: RealtimeData['kpiPayload'] | null = null;
+  private latestFeedPayload: RealtimeData['feedPayload'] | null = null;
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
   private reconnectDelay = 3000;
@@ -59,6 +69,7 @@ class RealtimeManager {
   private notificationReconnectAttempts = 0;
   private analyticsReconnectAttempts = 0;
   private feedReconnectAttempts = 0;
+  private disconnected = false;
 
   constructor() {
     this.listeners.set('onlineUsers', new Set());
@@ -75,8 +86,10 @@ class RealtimeManager {
    * Connect to SSE endpoint
    */
   connect(): void {
+    this.disconnected = false;
+    this.clearReconnectTimer('presence');
     if (this.eventSource) {
-      this.eventSource.close();
+      return;
     }
 
     try {
@@ -93,10 +106,11 @@ class RealtimeManager {
 
       this.eventSource.addEventListener('error', () => {
         console.warn('SSE connection error, attempting reconnect...');
+        this.eventSource?.close();
+        this.eventSource = null;
         this.reconnect();
       });
 
-      this.reconnectAttempts = 0;
       console.log('Connected to real-time presence');
     } catch (error) {
       console.error('Failed to connect SSE:', error);
@@ -110,6 +124,7 @@ class RealtimeManager {
   private handleMessage(data: RealtimeData): void {
     switch (data.type) {
       case 'connected':
+        this.reconnectAttempts = 0;
         console.log('Real-time connection established');
         break;
 
@@ -143,6 +158,10 @@ class RealtimeManager {
    * Reconnect with exponential backoff
    */
   private reconnect(): void {
+    if (this.disconnected || this.presenceReconnectTimer) {
+      return;
+    }
+
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       console.error('Max reconnect attempts reached, giving up');
       return;
@@ -152,7 +171,12 @@ class RealtimeManager {
     const delay = this.reconnectDelay * Math.pow(2, this.reconnectAttempts - 1);
 
     console.log(`Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts})`);
-    setTimeout(() => this.connect(), delay);
+    this.presenceReconnectTimer = setTimeout(() => {
+      this.presenceReconnectTimer = null;
+      if (!this.disconnected) {
+        this.connect();
+      }
+    }, delay);
   }
 
   /**
@@ -171,44 +195,53 @@ class RealtimeManager {
     }
   }
 
+  private subscribe<T>(event: string, callback: (data: T) => void, immediateValue?: T): () => void {
+    const listeners = this.listeners.get(event)!;
+
+    if (listeners.has(callback)) {
+      if (arguments.length === 3) {
+        callback(immediateValue as T);
+      }
+      return () => {
+        listeners.delete(callback);
+      };
+    }
+
+    if (listeners.size >= RealtimeManager.MAX_LISTENERS_PER_EVENT) {
+      console.warn(`Listener cap reached for ${event}`);
+      return () => {};
+    }
+
+    listeners.add(callback);
+
+    if (arguments.length === 3) {
+      callback(immediateValue as T);
+    }
+
+    return () => {
+      listeners.delete(callback);
+    };
+  }
+
   /**
    * Subscribe to online users updates
    */
   subscribeToOnlineUsers(callback: (count: number) => void): () => void {
-    const listeners = this.listeners.get('onlineUsers')!;
-    listeners.add(callback);
-
-    // Call immediately with current value
-    callback(this.onlineUsers);
-
-    // Return unsubscribe function
-    return () => {
-      listeners.delete(callback);
-    };
+    return this.subscribe('onlineUsers', callback, this.onlineUsers);
   }
 
   /**
    * Subscribe to trending searches
    */
   subscribeToTrendingSearches(callback: (searches: string[]) => void): () => void {
-    const listeners = this.listeners.get('trendingSearches')!;
-    listeners.add(callback);
-
-    return () => {
-      listeners.delete(callback);
-    };
+    return this.subscribe('trendingSearches', callback);
   }
 
   /**
    * Subscribe to active places
    */
   subscribeToActivePlaces(callback: (places: string[]) => void): () => void {
-    const listeners = this.listeners.get('activePlaces')!;
-    listeners.add(callback);
-
-    return () => {
-      listeners.delete(callback);
-    };
+    return this.subscribe('activePlaces', callback);
   }
 
   /**
@@ -222,8 +255,10 @@ class RealtimeManager {
    * Connect to messaging SSE endpoint (for authenticated users)
    */
   connectToMessages(): void {
+    this.disconnected = false;
+    this.clearReconnectTimer('message');
     if (this.messageEventSource) {
-      this.messageEventSource.close();
+      return;
     }
 
     try {
@@ -240,10 +275,11 @@ class RealtimeManager {
 
       this.messageEventSource.addEventListener('error', () => {
         console.warn('Message SSE connection error, attempting reconnect...');
+        this.messageEventSource?.close();
+        this.messageEventSource = null;
         this.reconnectMessages();
       });
 
-      this.messageReconnectAttempts = 0;
       console.log('Connected to real-time messages');
     } catch (error) {
       console.error('Failed to connect message SSE:', error);
@@ -257,6 +293,7 @@ class RealtimeManager {
   private handleMessageData(data: RealtimeData): void {
     switch (data.type) {
       case 'connected':
+        this.messageReconnectAttempts = 0;
         console.log('Message real-time connection established');
         break;
 
@@ -277,6 +314,10 @@ class RealtimeManager {
    * Reconnect messages SSE with exponential backoff
    */
   private reconnectMessages(): void {
+    if (this.disconnected || this.messageReconnectTimer) {
+      return;
+    }
+
     if (this.messageReconnectAttempts >= this.maxReconnectAttempts) {
       console.error('Max message reconnect attempts reached');
       return;
@@ -286,23 +327,19 @@ class RealtimeManager {
     const delay = this.reconnectDelay * Math.pow(2, this.messageReconnectAttempts - 1);
 
     console.log(`Reconnecting messages in ${delay}ms (attempt ${this.messageReconnectAttempts})`);
-    setTimeout(() => this.connectToMessages(), delay);
+    this.messageReconnectTimer = setTimeout(() => {
+      this.messageReconnectTimer = null;
+      if (!this.disconnected) {
+        this.connectToMessages();
+      }
+    }, delay);
   }
 
   /**
    * Subscribe to unread count updates
    */
   subscribeToUnreadCount(callback: (count: number) => void): () => void {
-    const listeners = this.listeners.get('unreadCount')!;
-    listeners.add(callback);
-
-    // Call immediately with current value
-    callback(this.unreadCount);
-
-    // Return unsubscribe function
-    return () => {
-      listeners.delete(callback);
-    };
+    return this.subscribe('unreadCount', callback, this.unreadCount);
   }
 
   /**
@@ -316,8 +353,10 @@ class RealtimeManager {
    * Connect to notifications SSE endpoint (for authenticated users)
    */
   connectToNotifications(): void {
+    this.disconnected = false;
+    this.clearReconnectTimer('notification');
     if (this.notificationEventSource) {
-      this.notificationEventSource.close();
+      return;
     }
 
     try {
@@ -334,10 +373,11 @@ class RealtimeManager {
 
       this.notificationEventSource.addEventListener('error', () => {
         console.warn('Notification SSE connection error, attempting reconnect...');
+        this.notificationEventSource?.close();
+        this.notificationEventSource = null;
         this.reconnectNotifications();
       });
 
-      this.notificationReconnectAttempts = 0;
       console.log('Connected to real-time notifications');
     } catch (error) {
       console.error('Failed to connect notification SSE:', error);
@@ -351,15 +391,17 @@ class RealtimeManager {
   private handleNotificationData(data: RealtimeData): void {
     switch (data.type) {
       case 'connected':
+        this.notificationReconnectAttempts = 0;
         console.log('Notification real-time connection established');
         break;
 
       case 'update':
         if (data.notificationCount !== undefined) {
           this.notificationCount = data.notificationCount;
+          this.latestNotifications = data.notifications || [];
           this.emit('notifications', {
             count: data.notificationCount,
-            notifications: data.notifications || []
+            notifications: this.latestNotifications
           });
         }
         break;
@@ -374,6 +416,10 @@ class RealtimeManager {
    * Reconnect notifications SSE with exponential backoff
    */
   private reconnectNotifications(): void {
+    if (this.disconnected || this.notificationReconnectTimer) {
+      return;
+    }
+
     if (this.notificationReconnectAttempts >= this.maxReconnectAttempts) {
       console.error('Max notification reconnect attempts reached');
       return;
@@ -383,34 +429,32 @@ class RealtimeManager {
     const delay = this.reconnectDelay * Math.pow(2, this.notificationReconnectAttempts - 1);
 
     console.log(`Reconnecting notifications in ${delay}ms (attempt ${this.notificationReconnectAttempts})`);
-    setTimeout(() => this.connectToNotifications(), delay);
+    this.notificationReconnectTimer = setTimeout(() => {
+      this.notificationReconnectTimer = null;
+      if (!this.disconnected) {
+        this.connectToNotifications();
+      }
+    }, delay);
   }
 
   /**
    * Subscribe to notification updates
    */
   subscribeToNotifications(callback: (data: { count: number; notifications: Notification[] }) => void): () => void {
-    const listeners = this.listeners.get('notifications')!;
-    listeners.add(callback);
-
-    // Call immediately with current value
-    callback({
+    return this.subscribe('notifications', callback, {
       count: this.notificationCount,
-      notifications: []
+      notifications: this.latestNotifications
     });
-
-    // Return unsubscribe function
-    return () => {
-      listeners.delete(callback);
-    };
   }
 
   /**
    * Connect to analytics SSE endpoint (for admin users)
    */
   connectToAnalytics(): void {
+    this.disconnected = false;
+    this.clearReconnectTimer('analytics');
     if (this.analyticsEventSource) {
-      this.analyticsEventSource.close();
+      return;
     }
 
     try {
@@ -427,10 +471,11 @@ class RealtimeManager {
 
       this.analyticsEventSource.addEventListener('error', () => {
         console.warn('Analytics SSE connection error, attempting reconnect...');
+        this.analyticsEventSource?.close();
+        this.analyticsEventSource = null;
         this.reconnectAnalytics();
       });
 
-      this.analyticsReconnectAttempts = 0;
       console.log('Connected to real-time analytics');
     } catch (error) {
       console.error('Failed to connect analytics SSE:', error);
@@ -444,17 +489,20 @@ class RealtimeManager {
   private handleAnalyticsData(data: RealtimeData): void {
     switch (data.type) {
       case 'connected':
+        this.analyticsReconnectAttempts = 0;
         console.log('Analytics real-time connection established');
         break;
 
       case 'metrics':
         if (data.metricsPayload) {
+          this.latestAnalyticsMetrics = data.metricsPayload;
           this.emit('analyticsMetrics', data.metricsPayload);
         }
         break;
 
       case 'kpi':
         if (data.kpiPayload) {
+          this.latestAnalyticsKPI = data.kpiPayload;
           this.emit('analyticsKPI', data.kpiPayload);
         }
         break;
@@ -469,6 +517,10 @@ class RealtimeManager {
    * Reconnect analytics SSE with exponential backoff
    */
   private reconnectAnalytics(): void {
+    if (this.disconnected || this.analyticsReconnectTimer) {
+      return;
+    }
+
     if (this.analyticsReconnectAttempts >= this.maxReconnectAttempts) {
       console.error('Max analytics reconnect attempts reached');
       return;
@@ -478,39 +530,42 @@ class RealtimeManager {
     const delay = this.reconnectDelay * Math.pow(2, this.analyticsReconnectAttempts - 1);
 
     console.log(`Reconnecting analytics in ${delay}ms (attempt ${this.analyticsReconnectAttempts})`);
-    setTimeout(() => this.connectToAnalytics(), delay);
+    this.analyticsReconnectTimer = setTimeout(() => {
+      this.analyticsReconnectTimer = null;
+      if (!this.disconnected) {
+        this.connectToAnalytics();
+      }
+    }, delay);
   }
 
   /**
    * Subscribe to analytics metrics updates
    */
   onAnalyticsMetrics(callback: (metrics: any) => void): () => void {
-    const listeners = this.listeners.get('analyticsMetrics')!;
-    listeners.add(callback);
-
-    return () => {
-      listeners.delete(callback);
-    };
+    if (this.latestAnalyticsMetrics) {
+      return this.subscribe('analyticsMetrics', callback, this.latestAnalyticsMetrics);
+    }
+    return this.subscribe('analyticsMetrics', callback);
   }
 
   /**
    * Subscribe to analytics KPI updates
    */
   onAnalyticsKPI(callback: (kpi: any) => void): () => void {
-    const listeners = this.listeners.get('analyticsKPI')!;
-    listeners.add(callback);
-
-    return () => {
-      listeners.delete(callback);
-    };
+    if (this.latestAnalyticsKPI) {
+      return this.subscribe('analyticsKPI', callback, this.latestAnalyticsKPI);
+    }
+    return this.subscribe('analyticsKPI', callback);
   }
 
   /**
    * Connect to social feed SSE endpoint (for authenticated users)
    */
   connectToFeed(): void {
+    this.disconnected = false;
+    this.clearReconnectTimer('feed');
     if (this.feedEventSource) {
-      this.feedEventSource.close();
+      return;
     }
 
     try {
@@ -527,10 +582,11 @@ class RealtimeManager {
 
       this.feedEventSource.addEventListener('error', () => {
         console.warn('Feed SSE connection error, attempting reconnect...');
+        this.feedEventSource?.close();
+        this.feedEventSource = null;
         this.reconnectFeed();
       });
 
-      this.feedReconnectAttempts = 0;
       console.log('Connected to real-time feed');
     } catch (error) {
       console.error('Failed to connect feed SSE:', error);
@@ -544,11 +600,13 @@ class RealtimeManager {
   private handleFeedData(data: RealtimeData): void {
     switch (data.type) {
       case 'connected':
+        this.feedReconnectAttempts = 0;
         console.log('Feed real-time connection established');
         break;
 
       case 'feed_update':
         if (data.feedPayload) {
+          this.latestFeedPayload = data.feedPayload;
           this.emit('feedUpdate', data.feedPayload);
         }
         break;
@@ -563,6 +621,10 @@ class RealtimeManager {
    * Reconnect feed SSE with exponential backoff
    */
   private reconnectFeed(): void {
+    if (this.disconnected || this.feedReconnectTimer) {
+      return;
+    }
+
     if (this.feedReconnectAttempts >= this.maxReconnectAttempts) {
       console.error('Max feed reconnect attempts reached');
       return;
@@ -572,25 +634,52 @@ class RealtimeManager {
     const delay = this.reconnectDelay * Math.pow(2, this.feedReconnectAttempts - 1);
 
     console.log(`Reconnecting feed in ${delay}ms (attempt ${this.feedReconnectAttempts})`);
-    setTimeout(() => this.connectToFeed(), delay);
+    this.feedReconnectTimer = setTimeout(() => {
+      this.feedReconnectTimer = null;
+      if (!this.disconnected) {
+        this.connectToFeed();
+      }
+    }, delay);
+  }
+
+  private clearReconnectTimer(kind: 'presence' | 'message' | 'notification' | 'analytics' | 'feed'): void {
+    const timerMap = {
+      presence: 'presenceReconnectTimer',
+      message: 'messageReconnectTimer',
+      notification: 'notificationReconnectTimer',
+      analytics: 'analyticsReconnectTimer',
+      feed: 'feedReconnectTimer'
+    } as const;
+
+    const timerKey = timerMap[kind];
+    const timer = this[timerKey];
+    if (timer) {
+      clearTimeout(timer);
+      this[timerKey] = null;
+    }
   }
 
   /**
    * Subscribe to feed updates
    */
   onFeedUpdate(callback: (data: { activities: any[]; count: number }) => void): () => void {
-    const listeners = this.listeners.get('feedUpdate')!;
-    listeners.add(callback);
-
-    return () => {
-      listeners.delete(callback);
-    };
+    if (this.latestFeedPayload) {
+      return this.subscribe('feedUpdate', callback, this.latestFeedPayload);
+    }
+    return this.subscribe('feedUpdate', callback);
   }
 
   /**
    * Disconnect from SSE
    */
   disconnect(): void {
+    this.disconnected = true;
+    this.clearReconnectTimer('presence');
+    this.clearReconnectTimer('message');
+    this.clearReconnectTimer('notification');
+    this.clearReconnectTimer('analytics');
+    this.clearReconnectTimer('feed');
+
     if (this.eventSource) {
       this.eventSource.close();
       this.eventSource = null;

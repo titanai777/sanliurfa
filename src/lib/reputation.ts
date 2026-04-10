@@ -2,7 +2,7 @@
  * Reputation System Library
  * User reputation calculation and management
  */
-import { queryOne, queryMany, insert, update } from './postgres';
+import { queryOne, queryRows, insert, update } from './postgres';
 import { logger } from './logging';
 
 export async function getUserReputation(userId: string): Promise<any> {
@@ -67,7 +67,7 @@ export async function addReputationScore(userId: string, scoreType: string, poin
   }
 }
 
-export async function getRepuationTier(totalScore: number): string {
+export function getRepuationTier(totalScore: number): string {
   if (totalScore < 100) return 'Yeni Üye';
   if (totalScore < 500) return 'Aktif Üye';
   if (totalScore < 1000) return 'Katkıda Bulunan';
@@ -141,7 +141,7 @@ export async function awardReputation(userId: string, reason: string, points: nu
 
 export async function getTopUsers(limit: number = 10): Promise<any[]> {
   try {
-    const users = await queryMany(`
+    const users = await queryRows(`
       SELECT
         u.id,
         u.full_name,

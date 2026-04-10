@@ -5,10 +5,12 @@
 
 import type { APIRoute } from 'astro';
 import { createTenant, getTenantBySlug } from '../../../lib/multi-tenant';
-import { queryMany } from '../../../lib/postgres';
-import { apiResponse, apiError, HttpStatus, ErrorCode, getRequestId } from '../../../lib/api';
+import { queryRows } from '../../../lib/postgres';
+import { AppError, apiResponse, apiError, apiErrorFrom, HttpStatus, ErrorCode, getRequestId, parseJsonBody } from '../../../lib/api';
 import { recordRequest } from '../../../lib/metrics';
 import { logger } from '../../../lib/logging';
+
+const TENANT_SLUG_REGEX = /^[a-z0-9-]{3,50}$/;
 
 export const GET: APIRoute = async ({ request, locals }) => {
   const requestId = getRequestId({ request } as any);
@@ -28,7 +30,7 @@ export const GET: APIRoute = async ({ request, locals }) => {
     }
 
     // Get user's tenants (as owner or member)
-    const tenants = await queryMany(
+    const tenants = await queryRows(
       `SELECT DISTINCT t.* FROM tenants t
        LEFT JOIN tenant_members tm ON t.id = tm.tenant_id
        WHERE t.owner_id = $1 OR tm.user_id = $1
@@ -82,11 +84,40 @@ export const POST: APIRoute = async ({ request, locals }) => {
       );
     }
 
-    const body = await request.json();
-    const { name, slug, description } = body;
+    const parsed = await parseJsonBody(request);
+    if (parsed.error === 'UNSUPPORTED_CONTENT_TYPE') {
+      recordRequest('POST', '/api/tenants', HttpStatus.BAD_REQUEST, Date.now() - startTime);
+      return apiError(
+        ErrorCode.VALIDATION_ERROR,
+        'Content-Type application/json olmalı',
+        HttpStatus.BAD_REQUEST,
+        { contentType: parsed.contentType },
+        requestId
+      );
+    }
+
+    if (parsed.error === 'INVALID_JSON') {
+      recordRequest('POST', '/api/tenants', HttpStatus.BAD_REQUEST, Date.now() - startTime);
+      return apiError(
+        ErrorCode.VALIDATION_ERROR,
+        'Geçersiz JSON body',
+        HttpStatus.BAD_REQUEST,
+        undefined,
+        requestId
+      );
+    }
+
+    const { name, slug, description } = parsed.body as {
+      name?: unknown;
+      slug?: unknown;
+      description?: unknown;
+    };
+
+    const normalizedName = typeof name === 'string' ? name.trim() : '';
+    const normalizedSlug = typeof slug === 'string' ? slug.trim().toLowerCase() : '';
 
     // Validate input
-    if (!name || !slug) {
+    if (!normalizedName || !normalizedSlug) {
       recordRequest('POST', '/api/tenants', HttpStatus.BAD_REQUEST, Date.now() - startTime);
       return apiError(
         ErrorCode.VALIDATION_ERROR,
@@ -97,8 +128,30 @@ export const POST: APIRoute = async ({ request, locals }) => {
       );
     }
 
+    if (!TENANT_SLUG_REGEX.test(normalizedSlug)) {
+      recordRequest('POST', '/api/tenants', HttpStatus.UNPROCESSABLE_ENTITY, Date.now() - startTime);
+      return apiError(
+        ErrorCode.VALIDATION_ERROR,
+        'Invalid slug format',
+        HttpStatus.UNPROCESSABLE_ENTITY,
+        { slug: normalizedSlug },
+        requestId
+      );
+    }
+
+    if (description !== undefined && description !== null && typeof description !== 'string') {
+      recordRequest('POST', '/api/tenants', HttpStatus.UNPROCESSABLE_ENTITY, Date.now() - startTime);
+      return apiError(
+        ErrorCode.VALIDATION_ERROR,
+        'description must be a string',
+        HttpStatus.UNPROCESSABLE_ENTITY,
+        undefined,
+        requestId
+      );
+    }
+
     // Check if slug already exists
-    const existing = await getTenantBySlug(slug);
+    const existing = await getTenantBySlug(normalizedSlug);
     if (existing) {
       recordRequest('POST', '/api/tenants', HttpStatus.CONFLICT, Date.now() - startTime);
       return apiError(
@@ -111,7 +164,8 @@ export const POST: APIRoute = async ({ request, locals }) => {
     }
 
     // Create tenant
-    const tenant = await createTenant(name, slug, locals.user.id, description);
+    const normalizedDescription = typeof description === 'string' ? description.trim() : undefined;
+    const tenant = await createTenant(normalizedName, normalizedSlug, locals.user.id, normalizedDescription);
 
     if (!tenant) {
       recordRequest('POST', '/api/tenants', HttpStatus.INTERNAL_SERVER_ERROR, Date.now() - startTime);
@@ -137,6 +191,11 @@ export const POST: APIRoute = async ({ request, locals }) => {
       requestId
     );
   } catch (error) {
+    if (error instanceof AppError) {
+      recordRequest('POST', '/api/tenants', error.statusCode, Date.now() - startTime);
+      return apiErrorFrom(error, requestId);
+    }
+
     const duration = Date.now() - startTime;
     recordRequest('POST', '/api/tenants', HttpStatus.INTERNAL_SERVER_ERROR, duration);
     logger.error(

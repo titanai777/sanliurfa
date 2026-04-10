@@ -3,6 +3,7 @@
  * Distributed tracing, SLO tracking, error budgets, performance baselines
  */
 
+import { randomUUID } from 'crypto';
 import { logger } from './logging';
 
 // ==================== TYPES & INTERFACES ====================
@@ -37,7 +38,7 @@ export interface ErrorBudget {
   badEvents: number;
 }
 
-export interface PerformanceBaseline {
+export interface PerformanceBaselineStats {
   mean: number;
   p50: number;
   p95: number;
@@ -62,8 +63,8 @@ export class TraceCollector {
    * Start a new span
    */
   startSpan(name: string, parentSpanId?: string): Span {
-    const traceId = this.currentContext?.traceId || 'trace-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
-    const spanId = 'span-' + Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+    const traceId = this.currentContext?.traceId || `trace-${randomUUID()}`;
+    const spanId = `span-${randomUUID()}`;
 
     const span: Span = {
       traceId,
@@ -221,7 +222,7 @@ export class ErrorBudgetManager {
 
 // ==================== PERFORMANCE BASELINE ====================
 
-export class PerformanceBaseline {
+export class PerformanceBaselineManager {
   private samples = new Map<string, number[]>();
 
   /**
@@ -244,7 +245,7 @@ export class PerformanceBaseline {
   /**
    * Get baseline statistics
    */
-  getBaseline(metricName: string): PerformanceBaseline | null {
+  getBaseline(metricName: string): PerformanceBaselineStats | null {
     const samples = this.samples.get(metricName);
     if (!samples || samples.length === 0) {
       return null;
@@ -305,4 +306,4 @@ export class PerformanceBaseline {
 
 export const traceCollector = new TraceCollector();
 export const errorBudgetManager = new ErrorBudgetManager();
-export const performanceBaseline = new PerformanceBaseline();
+export const performanceBaseline = new PerformanceBaselineManager();

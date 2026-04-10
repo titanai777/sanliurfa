@@ -3,8 +3,9 @@
  * Admin functions for subscription management and analytics
  */
 
-import { query, queryOne, queryMany, insert, update as updateDb } from './postgres';
+import { query, queryOne, queryRows, insert, update as updateDb } from './postgres';
 import { logger } from './logging';
+import { createRefundForInvoice } from './stripe-client';
 
 /**
  * Get subscription analytics
@@ -34,7 +35,7 @@ export async function getSubscriptionAnalytics(): Promise<{
     );
 
     // By tier
-    const byTierResults = await queryMany(
+    const byTierResults = await queryRows(
       `SELECT st.display_name, COUNT(*) as count
        FROM subscriptions s
        JOIN subscription_tiers st ON s.tier_id = st.id
@@ -70,6 +71,16 @@ export async function getSubscriptionAnalytics(): Promise<{
        FROM subscriptions`
     );
 
+    const lifetimeValueResult = await queryOne(
+      `SELECT COALESCE(AVG(customer_total), 0) as average_lifetime_value
+       FROM (
+         SELECT user_id, SUM(amount) as customer_total
+         FROM billing_history
+         WHERE payment_status = 'paid'
+         GROUP BY user_id
+       ) customer_revenue`
+    );
+
     return {
       totalSubscriptions: totalResult?.count || 0,
       activeSubscriptions: activeResult?.count || 0,
@@ -77,7 +88,7 @@ export async function getSubscriptionAnalytics(): Promise<{
       byTier,
       mrr: parseFloat(mrrResult?.mrr || 0),
       arr: parseFloat(arrResult?.arr || 0),
-      averageLifetimeValue: 0, // TODO: Calculate from billing history
+      averageLifetimeValue: parseFloat(lifetimeValueResult?.average_lifetime_value || 0),
       churnRate: parseFloat(churnResult?.churn_rate || 0),
     };
   } catch (error) {
@@ -195,7 +206,10 @@ export async function processRefund(
 ): Promise<boolean> {
   try {
     const refundRequest = await queryOne(
-      'SELECT id, user_id, amount FROM refund_requests WHERE id = $1',
+      `SELECT r.id, r.user_id, r.amount, r.billing_id, b.subscription_id, b.currency, b.stripe_invoice_id
+       FROM refund_requests r
+       JOIN billing_history b ON r.billing_id = b.id
+       WHERE r.id = $1`,
       [refundRequestId]
     );
 
@@ -213,14 +227,35 @@ export async function processRefund(
     });
 
     if (approve) {
+      if (refundRequest.stripe_invoice_id) {
+        const stripeRefund = await createRefundForInvoice(refundRequest.stripe_invoice_id, Number(refundRequest.amount));
+
+        await updateDb('billing_history', refundRequest.billing_id, {
+          payment_status: 'refunded'
+        });
+
+        await insert('subscription_events', {
+          subscription_id: refundRequest.subscription_id,
+          user_id: refundRequest.user_id,
+          event_type: 'refund_processed',
+          amount: refundRequest.amount,
+          currency: refundRequest.currency || 'TRY',
+          reason: notes || 'Admin refund',
+          metadata: JSON.stringify({
+            refundRequestId,
+            stripeRefundId: stripeRefund.id,
+            stripeInvoiceId: refundRequest.stripe_invoice_id
+          }),
+          created_at: new Date().toISOString(),
+        });
+      }
+
       logger.info('Refund approved', {
         refundId: refundRequestId,
         userId: refundRequest.user_id,
         amount: refundRequest.amount,
         admin: adminId,
       });
-
-      // TODO: Process actual refund via Stripe
     }
 
     return true;
@@ -251,7 +286,7 @@ export async function getRefundRequests(status?: string): Promise<any[]> {
 
     sql += ` ORDER BY r.created_at DESC LIMIT 100`;
 
-    return await queryMany(sql, params);
+    return await queryRows(sql, params);
   } catch (error) {
     logger.error('Failed to get refund requests', error instanceof Error ? error : new Error(String(error)));
     return [];
@@ -280,7 +315,7 @@ export async function getSubscriptionEvents(userId?: string, limit: number = 100
     sql += ` ORDER BY se.created_at DESC LIMIT $${paramCount}`;
     params.push(limit);
 
-    return await queryMany(sql, params);
+    return await queryRows(sql, params);
   } catch (error) {
     logger.error('Failed to get subscription events', error instanceof Error ? error : new Error(String(error)));
     return [];
@@ -308,7 +343,7 @@ export async function getAdminLogs(adminId?: string, limit: number = 100): Promi
     sql += ` ORDER BY asl.created_at DESC LIMIT $${paramCount}`;
     params.push(limit);
 
-    return await queryMany(sql, params);
+    return await queryRows(sql, params);
   } catch (error) {
     logger.error('Failed to get admin logs', error instanceof Error ? error : new Error(String(error)));
     return [];
@@ -382,7 +417,7 @@ export async function getUserSubscriptionDetails(userId: string): Promise<any> {
       return null;
     }
 
-    const billingHistory = await queryMany(
+    const billingHistory = await queryRows(
       `SELECT * FROM billing_history WHERE subscription_id = $1 ORDER BY created_at DESC LIMIT 10`,
       [subscription.id]
     );

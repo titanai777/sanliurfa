@@ -1,0 +1,34 @@
+# Environment Strategy
+
+## Source Of Truth
+- `.env.example` zorunlu ve desteklenen değişkenlerin tek kaynak listesidir.
+- Lokal doğrulama için varsayılan stack:
+  - PostgreSQL: `postgresql://postgres:postgres@127.0.0.1:5432/sanliurfa`
+  - Redis: `redis://127.0.0.1:6379`
+  - Dosya depolama: `STORAGE_TYPE=local`
+
+## File Roles
+- `.env.example`
+  - repo içi referans şablonu
+  - gerçek secret içermez
+- `.env.local`
+  - geliştiriciye özel override
+  - repo’ya commit edilmez
+- `.env.production`
+  - prod-benzeri lokal akış
+  - `release:gate:local` önce bunu yükler
+
+## Local Validation
+- Tam lokal kalite hattı:
+  - `npm run release:gate:local`
+- PWA runtime smoke:
+  - `npm run test:e2e:pwa`
+
+## Notes
+- `release:gate` mevcut shell env’i ile çalışır.
+- `release:gate:local` sırasıyla `.env.production`, `.env.local`, `.env` dosyalarını yükler.
+- `db:test:bootstrap` önce hedef `DATABASE_URL` bağlantısını dener; bağlantı varsa DB yaratmaya çalışmaz.
+- Google Analytics scripti yalnızca geçerli bir `PUBLIC_GOOGLE_ANALYTICS_ID` veya `GOOGLE_ANALYTICS_ID` verildiğinde render edilir.
+- Placeholder değerler (`G-XXXXXXXXXX`) artefact içine yazılmaz.
+- Dosya depolama için desteklenen backend'ler `local` ve `supabase` yüzeyidir. `s3` seçimi bu repoda açık hata ile reddedilir.
+- Ana sayfa hava durumu widget'ı Open-Meteo üzerinden gerçek veri çeker; ek API anahtarı gerektirmez ve erişim yoksa güvenli fallback render eder.

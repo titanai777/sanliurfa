@@ -8,6 +8,7 @@ import PerformanceMonitor from '../components/PerformanceMonitor';
 import ThemeScript from '../components/ThemeScript.astro';
 import DarkModeToggle from '../components/DarkModeToggle.astro';
 import PageLoader from '../components/PageLoader.astro';
+import { getRuntimeIntegrationSettings } from '../lib/runtime-integration-settings';
 import '../styles/global.css';
 
 export interface Props {
@@ -17,15 +18,32 @@ export interface Props {
   class?: string;
 }
 
-const { 
-  seo, 
-  hideHeader = false, 
+const {
+  seo,
+  hideHeader = false,
   hideFooter = false,
   class: className = ''
 } = Astro.props;
 
+const effectiveSeo: SEOProps = seo ?? {
+  title: 'Şanlıurfa.com',
+  description: 'Şanlıurfa şehir rehberi - Tarihi yerler, mekanlar, etkinlikler ve daha fazlası.',
+  canonicalUrl: `https://sanliurfa.com${Astro.url.pathname}`
+};
+
 // Get current user if authenticated
 const user = null; // Will be populated from server
+const runtimeIntegrationSettings = await getRuntimeIntegrationSettings();
+const rawGoogleAnalyticsId =
+  runtimeIntegrationSettings.analyticsId ||
+  import.meta.env.PUBLIC_GOOGLE_ANALYTICS_ID ||
+  process.env.PUBLIC_GOOGLE_ANALYTICS_ID ||
+  process.env.GOOGLE_ANALYTICS_ID ||
+  process.env.GA_TRACKING_ID ||
+  '';
+const googleAnalyticsId = rawGoogleAnalyticsId.trim();
+const hasGoogleAnalytics =
+  /^G-[A-Z0-9]+$/i.test(googleAnalyticsId) && googleAnalyticsId !== 'G-XXXXXXXXXX';
 ---
 
 <!DOCTYPE html>
@@ -54,7 +72,7 @@ const user = null; // Will be populated from server
     <meta name="apple-mobile-web-app-title" content="Şanlıurfa.com" />
     
     <!-- SEO -->
-    {seo && <SEO {...seo} />}
+    <SEO {...effectiveSeo} />
     
     <!-- RSS Feed -->
     <link rel="alternate" type="application/rss+xml" title="Şanlıurfa.com Blog" href="/rss.xml" />
@@ -176,13 +194,16 @@ const user = null; // Will be populated from server
       });
     </script>
     
-    <!-- Analytics (replace with your tracking code) -->
-    <script async src="https://www.googletagmanager.com/gtag/js?id=G-XXXXXXXXXX"></script>
-    <script>
-      window.dataLayer = window.dataLayer || [];
-      function gtag(){dataLayer.push(arguments);}
-      gtag('js', new Date());
-      gtag('config', 'G-XXXXXXXXXX');
-    </script>
+    {hasGoogleAnalytics && (
+      <>
+        <script async src={`https://www.googletagmanager.com/gtag/js?id=${googleAnalyticsId}`}></script>
+        <script define:vars={{ googleAnalyticsId }}>
+          window.dataLayer = window.dataLayer || [];
+          function gtag(){dataLayer.push(arguments);}
+          gtag('js', new Date());
+          gtag('config', googleAnalyticsId);
+        </script>
+      </>
+    )}
   </body>
 </html>

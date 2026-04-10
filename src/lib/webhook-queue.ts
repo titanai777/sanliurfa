@@ -3,9 +3,16 @@
  * Ensures reliable webhook delivery with exponential backoff
  */
 
+import { randomUUID } from 'crypto';
 import { pool } from './postgres';
 import { logger } from './logging';
+import { fetchWithTimeout } from './http';
 import { getCache, setCache } from './cache';
+import {
+  WEBHOOK_RETRY_MAX_ATTEMPTS,
+  getWebhookNextRetryAt,
+  calculateWebhookRetryBackoffSeconds,
+} from './webhook-delivery-policy';
 
 export interface WebhookDeliveryJob {
   id: string;
@@ -27,9 +34,7 @@ export interface WebhookDeliveryJob {
  * Webhook queue manager with retry and DLQ support
  */
 export class WebhookQueue {
-  private readonly maxRetries = 5;
-  private readonly initialBackoff = 60; // seconds
-  private readonly maxBackoff = 3600; // 1 hour
+  private readonly maxRetries = WEBHOOK_RETRY_MAX_ATTEMPTS;
   private readonly timeout = 30000; // 30 seconds
 
   /**
@@ -101,21 +106,15 @@ export class WebhookQueue {
       const payload = typeof job.payload === 'string' ? JSON.parse(job.payload) : job.payload;
       const headers = typeof job.headers === 'string' ? JSON.parse(job.headers) : (job.headers || {});
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), this.timeout);
-
       try {
-        const response = await fetch(job.url, {
+        const response = await fetchWithTimeout(job.url, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
             ...headers
           },
-          body: JSON.stringify(payload),
-          signal: controller.signal
-        });
-
-        clearTimeout(timeoutId);
+          body: JSON.stringify(payload)
+        }, this.timeout);
 
         if (response.ok) {
           // Success
@@ -141,8 +140,6 @@ export class WebhookQueue {
           }
         }
       } catch (error) {
-        clearTimeout(timeoutId);
-
         const errorMsg = error instanceof Error ? error.message : String(error);
 
         if (job.retry_count < this.maxRetries) {
@@ -166,11 +163,8 @@ export class WebhookQueue {
    */
   async scheduleRetry(job: any, error?: string): Promise<void> {
     const nextRetryCount = job.retry_count + 1;
-    const backoffSeconds = Math.min(
-      this.initialBackoff * Math.pow(2, job.retry_count),
-      this.maxBackoff
-    );
-    const nextRetryAt = new Date(Date.now() + backoffSeconds * 1000);
+    const backoffSeconds = calculateWebhookRetryBackoffSeconds(job.retry_count);
+    const nextRetryAt = getWebhookNextRetryAt(job.retry_count);
 
     try {
       await pool.query(
@@ -317,7 +311,7 @@ export class WebhookQueue {
    * Generate unique ID
    */
   private generateId(): string {
-    return `wh_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    return `wh_${randomUUID()}`;
   }
 }
 

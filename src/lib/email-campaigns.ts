@@ -3,45 +3,12 @@
  * Create, manage, and track email marketing campaigns
  */
 
-import { queryMany, queryOne, insert, update } from './postgres';
+import { queryRows, queryOne, insert, update } from './postgres';
 import { logger } from './logging';
+import { mapEmailCampaignRow } from './email-campaigns.mapper';
+import type { CampaignMetrics, CampaignStatus, EmailCampaign, SegmentType } from './email-campaigns.types';
 
-export type CampaignStatus = 'draft' | 'scheduled' | 'active' | 'paused' | 'completed' | 'failed';
-export type SegmentType = 'all_users' | 'subscribers' | 'premium' | 'inactive' | 'custom';
-
-export interface EmailCampaign {
-  id: string;
-  name: string;
-  subject: string;
-  fromName: string;
-  fromEmail: string;
-  htmlContent: string;
-  textContent: string;
-  segment: SegmentType;
-  segmentFilters?: Record<string, any>;
-  scheduledAt?: string;
-  status: CampaignStatus;
-  sendCount: number;
-  openCount: number;
-  clickCount: number;
-  unsubscribeCount: number;
-  bounceCount: number;
-  createdAt: string;
-  updatedAt: string;
-}
-
-export interface CampaignMetrics {
-  campaignId: string;
-  sendCount: number;
-  deliveryRate: number;
-  openRate: number;
-  clickRate: number;
-  unsubscribeRate: number;
-  bounceRate: number;
-  conversionRate: number;
-  topLinks: { url: string; clicks: number }[];
-  topRegions: { region: string; opens: number }[];
-}
+export type { CampaignMetrics, CampaignStatus, EmailCampaign, SegmentType } from './email-campaigns.types';
 
 /**
  * Create email campaign
@@ -74,26 +41,7 @@ export async function createCampaign(campaign: Omit<EmailCampaign, 'id' | 'creat
 
     logger.info('Email campaign created', { campaignId: result.id, name: campaign.name });
 
-    return {
-      id: result.id,
-      name: result.name,
-      subject: result.subject,
-      fromName: result.from_name,
-      fromEmail: result.from_email,
-      htmlContent: result.html_content,
-      textContent: result.text_content,
-      segment: result.segment,
-      segmentFilters: result.segment_filters ? JSON.parse(result.segment_filters) : undefined,
-      scheduledAt: result.scheduled_at,
-      status: result.status,
-      sendCount: result.send_count,
-      openCount: result.open_count,
-      clickCount: result.click_count,
-      unsubscribeCount: result.unsubscribe_count,
-      bounceCount: result.bounce_count,
-      createdAt: result.created_at,
-      updatedAt: result.updated_at
-    };
+    return mapEmailCampaignRow(result);
   } catch (error) {
     logger.error('Create campaign failed', error instanceof Error ? error : new Error(String(error)));
     return null;
@@ -111,26 +59,7 @@ export async function getCampaign(campaignId: string): Promise<EmailCampaign | n
       return null;
     }
 
-    return {
-      id: result.id,
-      name: result.name,
-      subject: result.subject,
-      fromName: result.from_name,
-      fromEmail: result.from_email,
-      htmlContent: result.html_content,
-      textContent: result.text_content,
-      segment: result.segment,
-      segmentFilters: result.segment_filters ? JSON.parse(result.segment_filters) : undefined,
-      scheduledAt: result.scheduled_at,
-      status: result.status,
-      sendCount: result.send_count,
-      openCount: result.open_count,
-      clickCount: result.click_count,
-      unsubscribeCount: result.unsubscribe_count,
-      bounceCount: result.bounce_count,
-      createdAt: result.created_at,
-      updatedAt: result.updated_at
-    };
+    return mapEmailCampaignRow(result);
   } catch (error) {
     logger.error('Get campaign failed', error instanceof Error ? error : new Error(String(error)));
     return null;
@@ -142,28 +71,9 @@ export async function getCampaign(campaignId: string): Promise<EmailCampaign | n
  */
 export async function getAllCampaigns(limit: number = 50): Promise<EmailCampaign[]> {
   try {
-    const results = await queryMany('SELECT * FROM email_campaigns ORDER BY created_at DESC LIMIT $1', [limit]);
+    const results = await queryRows('SELECT * FROM email_campaigns ORDER BY created_at DESC LIMIT $1', [limit]);
 
-    return results.map((r: any) => ({
-      id: r.id,
-      name: r.name,
-      subject: r.subject,
-      fromName: r.from_name,
-      fromEmail: r.from_email,
-      htmlContent: r.html_content,
-      textContent: r.text_content,
-      segment: r.segment,
-      segmentFilters: r.segment_filters ? JSON.parse(r.segment_filters) : undefined,
-      scheduledAt: r.scheduled_at,
-      status: r.status,
-      sendCount: r.send_count,
-      openCount: r.open_count,
-      clickCount: r.click_count,
-      unsubscribeCount: r.unsubscribe_count,
-      bounceCount: r.bounce_count,
-      createdAt: r.created_at,
-      updatedAt: r.updated_at
-    }));
+    return results.map((r: any) => mapEmailCampaignRow(r));
   } catch (error) {
     logger.error('Get all campaigns failed', error instanceof Error ? error : new Error(String(error)));
     return [];
@@ -220,7 +130,7 @@ export async function getCampaignMetrics(campaignId: string): Promise<CampaignMe
       clickRate: campaign.sendCount > 0 ? (campaign.clickCount / campaign.sendCount) * 100 : 0,
       unsubscribeRate: campaign.sendCount > 0 ? (campaign.unsubscribeCount / campaign.sendCount) * 100 : 0,
       bounceRate: campaign.sendCount > 0 ? (campaign.bounceCount / campaign.sendCount) * 100 : 0,
-      conversionRate: campaign.clickCount > 0 ? (campaign.clickCount / campaign.sendCount) * 100 : 0,
+      conversionRate: campaign.sendCount > 0 ? (campaign.clickCount / campaign.sendCount) * 100 : 0,
       topLinks: [],
       topRegions: []
     };
@@ -342,11 +252,13 @@ export async function querySegmentUsers(segment: SegmentType, filters?: Record<s
         return [];
     }
 
-    const results = await queryMany(query, params);
-    return results.map((r: any) => ({
-      id: r.id,
-      email: r.email
-    }));
+    const results = await queryRows(query, params);
+    return results
+      .filter((r: any) => typeof r?.id === 'string' && typeof r?.email === 'string')
+      .map((r: any) => ({
+        id: r.id,
+        email: r.email
+      }));
   } catch (error) {
     logger.error('Query segment users failed', error instanceof Error ? error : new Error(String(error)));
     return [];
@@ -377,8 +289,8 @@ export async function sendCampaign(campaignId: number | string, testMode: boolea
       return { sent: 0, failed: 0 };
     }
 
-    // In test mode, only send to first user (admin email)
-    const recipientEmails = testMode ? users.slice(0, 1).map(u => u.email) : users.map(u => u.email);
+    // In test mode, only send to the first matched user.
+    const targetUsers = testMode ? users.slice(0, 1) : users;
 
     let sentCount = 0;
     let failedCount = 0;
@@ -388,7 +300,7 @@ export async function sendCampaign(campaignId: number | string, testMode: boolea
     const { shouldNotify } = await import('./email-preferences');
 
     // Send emails
-    for (const user of users) {
+    for (const user of targetUsers) {
       try {
         // Check if user wants promotional emails
         const canReceive = await shouldNotify(user.id, 'promotional');
@@ -406,7 +318,7 @@ export async function sendCampaign(campaignId: number | string, testMode: boolea
         if (success) {
           sentCount++;
           // Track sent event
-          await trackCampaignEvent(Number(campaignId), user.id, 'sent');
+          await trackCampaignEvent(campaignId, user.id, 'sent');
         } else {
           failedCount++;
         }
@@ -459,7 +371,7 @@ export async function scheduleCampaign(campaignId: number | string, scheduledAt:
 /**
  * Track campaign events (opens, clicks, unsubscribes)
  */
-export async function trackCampaignEvent(campaignId: number, userId: string, eventType: string, linkUrl?: string): Promise<boolean> {
+export async function trackCampaignEvent(campaignId: number | string, userId: string, eventType: string, linkUrl?: string): Promise<boolean> {
   try {
     const query = `
       INSERT INTO campaign_tracking

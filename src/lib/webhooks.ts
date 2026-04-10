@@ -3,8 +3,9 @@
  * Event-driven webhooks for external integrations
  */
 
-import { query, queryOne, insert, queryMany } from './postgres';
+import { query, queryOne, insert, queryRows } from './postgres';
 import { logger } from './logging';
+import { fetchWithTimeout } from './http';
 
 export interface WebhookEvent {
   id: string;
@@ -63,17 +64,17 @@ export async function registerWebhook(
 export async function triggerWebhook(event: string, data: Record<string, any>, userId: string): Promise<void> {
   try {
     // Find webhooks for this event
-    const webhooks = await queryMany(
+    const webhooks = await queryRows(
       'SELECT * FROM webhooks WHERE event = $1 AND user_id = $2 AND active = true',
       [event, userId]
     );
 
-    if (webhooks.rows.length === 0) {
+    if (webhooks.length === 0) {
       return;
     }
 
     // Create event records and queue for delivery
-    for (const webhook of webhooks.rows) {
+    for (const webhook of webhooks) {
       await insert('webhook_events', {
         webhook_id: webhook.id,
         event,
@@ -83,7 +84,7 @@ export async function triggerWebhook(event: string, data: Record<string, any>, u
       });
     }
 
-    logger.info('Webhook event queued', { event, count: webhooks.rows.length });
+    logger.info('Webhook event queued', { event, count: webhooks.length });
   } catch (error) {
     logger.error('Failed to trigger webhook', error instanceof Error ? error : new Error(String(error)), {
       event,
@@ -97,7 +98,7 @@ export async function triggerWebhook(event: string, data: Record<string, any>, u
  */
 export async function processPendingWebhooks(maxRetries: number = 3): Promise<void> {
   try {
-    const pendingEvents = await queryMany(
+    const pendingEvents = await queryRows(
       `SELECT we.*, w.url, w.secret
        FROM webhook_events we
        JOIN webhooks w ON we.webhook_id = w.id
@@ -107,11 +108,34 @@ export async function processPendingWebhooks(maxRetries: number = 3): Promise<vo
       [maxRetries]
     );
 
-    for (const event of pendingEvents.rows) {
+    for (const event of pendingEvents) {
       await deliverWebhook(event);
     }
   } catch (error) {
     logger.error('Failed to process webhooks', error instanceof Error ? error : new Error(String(error)));
+  }
+}
+
+export async function retryFailedDeliveries(maxRetries: number = 3): Promise<number> {
+  try {
+    const retryableEvents = await queryRows(
+      `SELECT id
+       FROM webhook_events
+       WHERE status = 'failed' AND attempts < $1
+       AND (next_retry_at IS NULL OR next_retry_at <= NOW())`,
+      [maxRetries]
+    );
+
+    const retryCount = retryableEvents.length;
+    if (retryCount === 0) {
+      return 0;
+    }
+
+    await processPendingWebhooks(maxRetries);
+    return retryCount;
+  } catch (error) {
+    logger.error('Failed to retry webhook deliveries', error instanceof Error ? error : new Error(String(error)));
+    return 0;
   }
 }
 
@@ -120,15 +144,14 @@ export async function processPendingWebhooks(maxRetries: number = 3): Promise<vo
  */
 async function deliverWebhook(event: any): Promise<void> {
   try {
-    const response = await fetch(event.url, {
+    const response = await fetchWithTimeout(event.url, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         'X-Webhook-Signature': generateSignature(event.data, event.secret)
       },
-      body: event.data,
-      timeout: 5000
-    });
+      body: event.data
+    }, 5000);
 
     if (response.ok) {
       await query(
@@ -175,12 +198,12 @@ function generateSignature(data: string, secret?: string): string {
  */
 export async function getUserWebhooks(userId: string): Promise<Webhook[]> {
   try {
-    const webhooks = await queryMany(
+    const webhooks = await queryRows(
       'SELECT * FROM webhooks WHERE user_id = $1 ORDER BY created_at DESC',
       [userId]
     );
 
-    return webhooks.rows;
+    return webhooks;
   } catch (error) {
     logger.error('Failed to get user webhooks', error instanceof Error ? error : new Error(String(error)), {
       userId

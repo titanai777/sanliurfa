@@ -4,7 +4,7 @@
  */
 
 import { logger } from './logger';
-import { redis } from './cache';
+import { getRedisClient } from './cache';
 
 interface Event {
   id: string;
@@ -29,7 +29,7 @@ interface EventVersion {
   transformations: Array<{ from: number; to: number; transform: (data: any) => any }>;
 }
 
-interface EventSnapshot {
+interface EventSnapshotRecord {
   aggregateId: string;
   aggregateType: string;
   version: number;
@@ -79,7 +79,11 @@ class EventStore {
     this.events.push(event);
 
     const cacheKey = `sanliurfa:event:${id}`;
-    redis.setex(cacheKey, 604800, JSON.stringify(event)); // 7 days
+    void getRedisClient()
+      .then((redis) => redis.setEx(cacheKey, 604800, JSON.stringify(event)))
+      .catch((error) => {
+        logger.warn('Failed to persist event to Redis', { cacheKey, error });
+      });
 
     logger.info('Event appended', {
       id,
@@ -197,7 +201,7 @@ class EventVersionManager {
 }
 
 class EventSnapshot {
-  private snapshots: Map<string, EventSnapshot> = new Map();
+  private snapshots: Map<string, EventSnapshotRecord> = new Map();
   private counter = 0;
 
   createSnapshot(
@@ -205,8 +209,8 @@ class EventSnapshot {
     aggregateType: string,
     version: number,
     state: Record<string, any>
-  ): EventSnapshot {
-    const snapshot: EventSnapshot = {
+  ): EventSnapshotRecord {
+    const snapshot: EventSnapshotRecord = {
       aggregateId,
       aggregateType,
       version,
@@ -218,13 +222,17 @@ class EventSnapshot {
     this.snapshots.set(snapshotId, snapshot);
 
     const cacheKey = `sanliurfa:snapshot:${snapshotId}`;
-    redis.setex(cacheKey, 2592000, JSON.stringify(snapshot)); // 30 days
+    void getRedisClient()
+      .then((redis) => redis.setEx(cacheKey, 2592000, JSON.stringify(snapshot)))
+      .catch((error) => {
+        logger.warn('Failed to persist snapshot to Redis', { cacheKey, error });
+      });
 
     logger.debug('Snapshot created', { aggregateId, version });
     return snapshot;
   }
 
-  getLatestSnapshot(aggregateId: string): EventSnapshot | undefined {
+  getLatestSnapshot(aggregateId: string): EventSnapshotRecord | undefined {
     const snapshots = Array.from(this.snapshots.values())
       .filter(s => s.aggregateId === aggregateId)
       .sort((a, b) => b.version - a.version);
@@ -240,7 +248,11 @@ class EventSnapshot {
 
     for (const [key] of snapshots) {
       this.snapshots.delete(key);
-      redis.del(`sanliurfa:snapshot:${key}`);
+      void getRedisClient()
+        .then((redis) => redis.del(`sanliurfa:snapshot:${key}`))
+        .catch((error) => {
+          logger.warn('Failed to delete snapshot from Redis', { key, error });
+        });
     }
 
     logger.debug('Old snapshots deleted', { aggregateId, deleted: snapshots.length });
@@ -294,4 +306,4 @@ export const eventVersionManager = new EventVersionManager();
 export const eventSnapshot = new EventSnapshot();
 export const eventRecovery = new EventRecovery();
 
-export { Event, EventVersion, EventSnapshot as EventSnapshotType, RecoveryPoint };
+export type { Event, EventVersion, EventSnapshotRecord as EventSnapshot, RecoveryPoint };

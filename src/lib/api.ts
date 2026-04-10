@@ -1,6 +1,7 @@
 // API utilities for standardized responses and request validation
 
 import type { APIContext } from 'astro';
+import { randomUUID } from 'crypto';
 
 /**
  * Standard API response envelope
@@ -16,6 +17,22 @@ export interface ApiResponse<T = any> {
     timestamp: string;
     requestId?: string;
   };
+}
+
+export type ApiErrorCode = string;
+
+export class AppError extends Error {
+  code: ApiErrorCode;
+  statusCode: number;
+  details?: Record<string, any>;
+
+  constructor(code: ApiErrorCode, message: string, statusCode: number, details?: Record<string, any>) {
+    super(message);
+    this.name = 'AppError';
+    this.code = code;
+    this.statusCode = statusCode;
+    this.details = details;
+  }
 }
 
 /**
@@ -153,6 +170,10 @@ export function apiError(
   return new Response(JSON.stringify(body), { status, headers });
 }
 
+export function apiErrorFrom(error: AppError, requestId?: string): Response {
+  return apiError(error.code, error.message, error.statusCode, error.details, requestId);
+}
+
 /**
  * Extract and validate request body
  */
@@ -176,6 +197,69 @@ export async function getValidatedBody<T>(
   } catch (error) {
     return { data: null, error: 'Invalid JSON' };
   }
+}
+
+export function parseBoundedInt(
+  rawValue: string | null,
+  options: {
+    defaultValue: number;
+    min: number;
+    max?: number;
+    allowZero?: boolean;
+  }
+): number | null {
+  if (rawValue === null) {
+    return options.defaultValue;
+  }
+
+  const parsed = Number.parseInt(rawValue, 10);
+  if (!Number.isFinite(parsed)) {
+    return null;
+  }
+
+  const effectiveMin = options.allowZero ? 0 : options.min;
+  if (parsed < effectiveMin) {
+    return null;
+  }
+
+  if (typeof options.max === 'number') {
+    return Math.min(parsed, options.max);
+  }
+
+  return parsed;
+}
+
+export async function parseJsonBody(
+  request: Request,
+  options?: {
+    requireContentType?: boolean;
+  }
+): Promise<{ body?: unknown; error?: 'UNSUPPORTED_CONTENT_TYPE' | 'INVALID_JSON'; contentType?: string }> {
+  const requireContentType = options?.requireContentType ?? true;
+  const contentType = request.headers.get('content-type') || '';
+
+  if (requireContentType && !contentType.toLowerCase().includes('application/json')) {
+    return { error: 'UNSUPPORTED_CONTENT_TYPE', contentType };
+  }
+
+  try {
+    const body = await request.json();
+    return { body };
+  } catch {
+    return { error: 'INVALID_JSON' };
+  }
+}
+
+export function ensureUuid(value: unknown, fieldName: string): string {
+  if (typeof value !== 'string' || !validators.uuid(value)) {
+    throw new AppError(
+      ErrorCode.VALIDATION_ERROR,
+      `Invalid ${fieldName}`,
+      HttpStatus.BAD_REQUEST
+    );
+  }
+
+  return value;
 }
 
 /**
@@ -243,7 +327,7 @@ export function sanitizeInput(input: string): string {
  * Extract request ID or generate one
  */
 export function getRequestId(context: APIContext): string {
-  return context.request.headers.get('x-request-id') || `req-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+  return context.request.headers.get('x-request-id') || `req-${randomUUID()}`;
 }
 
 /**
@@ -268,6 +352,8 @@ export const HttpStatus = {
  * Common error codes
  */
 export const ErrorCode = {
+  AUTH_REQUIRED: 'AUTH_REQUIRED',
+  AUTH_ERROR: 'AUTH_ERROR',
   VALIDATION_ERROR: 'VALIDATION_ERROR',
   UNAUTHORIZED: 'UNAUTHORIZED',
   FORBIDDEN: 'FORBIDDEN',

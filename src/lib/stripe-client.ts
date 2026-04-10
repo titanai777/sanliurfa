@@ -5,9 +5,22 @@
 
 import Stripe from 'stripe';
 import { logger } from './logging';
-import { getEnv } from './env';
 
 let stripeClient: Stripe | null = null;
+
+function getEnvValue(key: string): string | undefined {
+  const processValue = typeof process !== 'undefined' ? process.env[key] : undefined;
+  if (typeof processValue === 'string' && processValue.trim().length > 0) {
+    return processValue;
+  }
+
+  if (typeof import.meta !== 'undefined' && import.meta.env && key in import.meta.env) {
+    const value = import.meta.env[key as keyof ImportMetaEnv];
+    return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+  }
+
+  return undefined;
+}
 
 /**
  * Get or initialize Stripe client
@@ -17,7 +30,7 @@ export function getStripeClient(): Stripe {
     return stripeClient;
   }
 
-  const secretKey = getEnv('STRIPE_SECRET_KEY');
+  const secretKey = getEnvValue('STRIPE_SECRET_KEY');
   if (!secretKey) {
     throw new Error('STRIPE_SECRET_KEY environment variable is not set');
   }
@@ -164,7 +177,7 @@ export async function getInvoice(invoiceId: string): Promise<Stripe.Invoice> {
 export async function verifyWebhookSignature(body: string, signature: string | string[] | undefined): Promise<Stripe.Event> {
   try {
     const stripe = getStripeClient();
-    const webhookSecret = getEnv('STRIPE_WEBHOOK_SECRET');
+    const webhookSecret = getEnvValue('STRIPE_WEBHOOK_SECRET');
 
     if (!webhookSecret) {
       throw new Error('STRIPE_WEBHOOK_SECRET is not configured');
@@ -212,5 +225,39 @@ export async function getInvoicePdfUrl(invoiceId: string): Promise<string | null
   } catch (error) {
     logger.error('Failed to get invoice PDF', error instanceof Error ? error : new Error(String(error)));
     return null;
+  }
+}
+
+/**
+ * Create refund from Stripe invoice payment
+ */
+export async function createRefundForInvoice(invoiceId: string, amount?: number): Promise<Stripe.Refund> {
+  try {
+    const stripe = getStripeClient();
+    const invoice = (await stripe.invoices.retrieve(invoiceId, {
+      expand: ['payment_intent']
+    })) as Stripe.Invoice & {
+      payment_intent?: string | Stripe.PaymentIntent | null;
+    };
+
+    const paymentIntent =
+      typeof invoice.payment_intent === 'string'
+        ? await stripe.paymentIntents.retrieve(invoice.payment_intent)
+        : invoice.payment_intent;
+
+    if (!paymentIntent?.id) {
+      throw new Error(`Invoice ${invoiceId} does not have a refundable payment intent`);
+    }
+
+    return await stripe.refunds.create({
+      payment_intent: paymentIntent.id,
+      ...(typeof amount === 'number' && amount > 0 ? { amount: Math.round(amount * 100) } : {})
+    });
+  } catch (error) {
+    logger.error('Failed to create refund for invoice', error instanceof Error ? error : new Error(String(error)), {
+      invoiceId,
+      amount
+    });
+    throw error;
   }
 }

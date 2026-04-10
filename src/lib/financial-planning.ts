@@ -4,6 +4,7 @@
  */
 
 import { logger } from './logging';
+import { deterministicBoolean, deterministicNumber, pickDeterministic } from './deterministic';
 
 // ==================== TYPES & INTERFACES ====================
 
@@ -40,7 +41,7 @@ export interface Scenario {
   projectedResult: Record<string, number>;
 }
 
-export interface CostOptimization {
+export interface CostOptimizationOpportunity {
   category: string;
   currentCost: number;
   potential: number;
@@ -160,11 +161,12 @@ export class FinancialForecaster {
    */
   forecast(months: number): Forecast[] {
     const forecasts: Forecast[] = [];
-    let baseRevenue = 100000;
+    let baseRevenue = deterministicNumber(`forecast:${months}:baseRevenue`, 90000, 120000, 2);
 
     for (let i = 0; i < months; i++) {
-      const revenue = baseRevenue + Math.random() * 20000 - 10000;
-      const expenses = revenue * (Math.random() * 0.4 + 0.3);
+      const seed = `forecast:${months}:month:${i}`;
+      const revenue = baseRevenue + deterministicNumber(`${seed}:delta`, -10000, 10000, 2);
+      const expenses = revenue * deterministicNumber(`${seed}:expenseRatio`, 0.3, 0.7, 4);
       const netIncome = revenue - expenses;
       const confidence = 0.95 - i * 0.03;
 
@@ -189,10 +191,10 @@ export class FinancialForecaster {
    */
   getRevenueForecast(months: number): number[] {
     const revenues: number[] = [];
-    let baseRevenue = 100000;
+    let baseRevenue = deterministicNumber(`revenue-forecast:${months}:base`, 90000, 120000, 2);
 
     for (let i = 0; i < months; i++) {
-      const revenue = baseRevenue + Math.random() * 20000 - 10000;
+      const revenue = baseRevenue + deterministicNumber(`revenue-forecast:${months}:${i}`, -10000, 10000, 2);
       revenues.push(revenue);
       baseRevenue = revenue;
     }
@@ -207,7 +209,7 @@ export class FinancialForecaster {
     const expenses: number[] = [];
 
     for (let i = 0; i < months; i++) {
-      expenses.push(Math.random() * 40000 + 20000);
+      expenses.push(deterministicNumber(`expense-forecast:${months}:${i}`, 20000, 60000, 2));
     }
 
     return expenses;
@@ -233,9 +235,10 @@ export class FinancialForecaster {
    * Get confidence interval
    */
   getConfidenceInterval(forecastId: string): { low: number; high: number } {
+    const low = deterministicNumber(`${forecastId}:ci:low`, 70000, 150000, 2);
     return {
-      low: Math.random() * 80000 + 70000,
-      high: Math.random() * 130000 + 100000
+      low,
+      high: low + deterministicNumber(`${forecastId}:ci:spread`, 15000, 70000, 2)
     };
   }
 }
@@ -351,25 +354,26 @@ export class ScenarioPlanner {
 
 // ==================== COST OPTIMIZATION ====================
 
-export class CostOptimization {
+export class CostOptimizationAnalyzer {
   /**
    * Analyze costs
    */
-  analyzeCosts(period: string): CostOptimization[] {
-    const optimizations: CostOptimization[] = [];
+  analyzeCosts(period: string): CostOptimizationOpportunity[] {
+    const optimizations: CostOptimizationOpportunity[] = [];
 
     const categories = ['Personnel', 'Operations', 'Marketing', 'Technology'];
 
     categories.forEach(category => {
-      const currentCost = Math.random() * 100000 + 50000;
-      const potential = Math.random() * 20000 + 5000;
+      const currentCost = deterministicNumber(`${period}:${category}:currentCost`, 50000, 150000, 2);
+      const potential = deterministicNumber(`${period}:${category}:potential`, 5000, 25000, 2);
+      const priorityScore = deterministicNumber(`${period}:${category}:priority`, 0, 1, 4);
 
       optimizations.push({
         category,
         currentCost,
         potential,
         recommendation: `Review ${category} spend and identify efficiencies`,
-        priority: Math.random() > 0.6 ? 'high' : Math.random() > 0.3 ? 'medium' : 'low'
+        priority: priorityScore > 0.66 ? 'high' : priorityScore > 0.33 ? 'medium' : 'low'
       });
     });
 
@@ -381,10 +385,10 @@ export class CostOptimization {
   /**
    * Identify reduction opportunities
    */
-  identifyReductionOpportunities(): CostOptimization[] {
-    const opportunities: CostOptimization[] = [];
+  identifyReductionOpportunities(): CostOptimizationOpportunity[] {
+    const opportunities: CostOptimizationOpportunity[] = [];
 
-    if (Math.random() > 0.4) {
+    if (deterministicBoolean('reduction:vendor-contracts', 0.4)) {
       opportunities.push({
         category: 'Vendor Contracts',
         currentCost: 500000,
@@ -394,7 +398,7 @@ export class CostOptimization {
       });
     }
 
-    if (Math.random() > 0.5) {
+    if (deterministicBoolean('reduction:energy-costs', 0.5)) {
       opportunities.push({
         category: 'Energy Costs',
         currentCost: 100000,
@@ -404,7 +408,7 @@ export class CostOptimization {
       });
     }
 
-    if (Math.random() > 0.6) {
+    if (deterministicBoolean('reduction:subscriptions', 0.6)) {
       opportunities.push({
         category: 'Subscriptions',
         currentCost: 50000,
@@ -416,20 +420,28 @@ export class CostOptimization {
 
     logger.info('Reduction opportunities identified', { count: opportunities.length });
 
-    return opportunities;
+    return opportunities.length > 0
+      ? opportunities
+      : [{
+          category: pickDeterministic(['Vendor Contracts', 'Energy Costs', 'Subscriptions'], 'reduction:fallback'),
+          currentCost: 50000,
+          potential: 5000,
+          recommendation: 'Review recurring operational spend for deterministic savings',
+          priority: 'medium'
+        }];
   }
 
   /**
    * Estimate savings
    */
-  estimateSavings(optimizations: CostOptimization[]): number {
+  estimateSavings(optimizations: CostOptimizationOpportunity[]): number {
     return optimizations.reduce((sum, opt) => sum + opt.potential, 0);
   }
 
   /**
    * Prioritize reductions
    */
-  prioritizeReductions(): CostOptimization[] {
+  prioritizeReductions(): CostOptimizationOpportunity[] {
     const optimizations = this.identifyReductionOpportunities();
 
     return optimizations.sort((a, b) => {
@@ -444,6 +456,6 @@ export class CostOptimization {
 const budgetPlanner = new BudgetPlanner();
 const financialForecaster = new FinancialForecaster();
 const scenarioPlanner = new ScenarioPlanner();
-const costOptimization = new CostOptimization();
+const costOptimization = new CostOptimizationAnalyzer();
 
 export { budgetPlanner, financialForecaster, scenarioPlanner, costOptimization };

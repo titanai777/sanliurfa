@@ -4,7 +4,7 @@
  */
 
 import { logger } from './logger';
-import { redis } from './cache';
+import { getRedisClient } from './cache';
 
 interface EmbeddingMetrics {
   modelId: string;
@@ -28,7 +28,7 @@ interface RetrievalMetrics {
   latencyP99: number;
 }
 
-interface LLMMetrics {
+interface LLMMetricsRecord {
   model: string;
   timestamp: number;
   requestCount: number;
@@ -54,6 +54,17 @@ class EmbeddingAnalytics {
   private metrics: EmbeddingMetrics[] = [];
   private counter = 0;
 
+  private persistMetric(cacheKey: string, metric: EmbeddingMetrics): void {
+    void getRedisClient()
+      .then((redis) => Promise.all([
+        redis.lPush(cacheKey, JSON.stringify(metric)),
+        redis.lTrim(cacheKey, 0, 999)
+      ]))
+      .catch((error) => {
+        logger.warn('Failed to persist embedding metrics to Redis', { cacheKey, error });
+      });
+  }
+
   recordMetrics(config: {
     modelId: string;
     embeddingCount: number;
@@ -75,8 +86,7 @@ class EmbeddingAnalytics {
     this.metrics.push(metric);
 
     const cacheKey = `sanliurfa:embedding-metrics:${config.modelId}`;
-    redis.lpush(cacheKey, JSON.stringify(metric));
-    redis.ltrim(cacheKey, 0, 999);
+    this.persistMetric(cacheKey, metric);
 
     logger.debug('Embedding metrics recorded', {
       model: config.modelId,
@@ -143,6 +153,17 @@ class EmbeddingAnalytics {
 class RetrievalAnalytics {
   private metrics: RetrievalMetrics[] = [];
 
+  private persistMetric(cacheKey: string, metric: RetrievalMetrics): void {
+    void getRedisClient()
+      .then((redis) => Promise.all([
+        redis.lPush(cacheKey, JSON.stringify(metric)),
+        redis.lTrim(cacheKey, 0, 999)
+      ]))
+      .catch((error) => {
+        logger.warn('Failed to persist retrieval metrics to Redis', { cacheKey, error });
+      });
+  }
+
   recordMetrics(config: {
     queryCount: number;
     precision: number;
@@ -171,8 +192,7 @@ class RetrievalAnalytics {
     this.metrics.push(metric);
 
     const cacheKey = 'sanliurfa:retrieval-metrics';
-    redis.lpush(cacheKey, JSON.stringify(metric));
-    redis.ltrim(cacheKey, 0, 999);
+    this.persistMetric(cacheKey, metric);
 
     logger.info('Retrieval metrics recorded', {
       queries: config.queryCount,
@@ -233,8 +253,19 @@ class RetrievalAnalytics {
   }
 }
 
-class LLMMetrics {
-  private metrics: LLMMetrics[] = [];
+class LLMMetricsMonitor {
+  private metrics: LLMMetricsRecord[] = [];
+
+  private persistMetric(cacheKey: string, metric: LLMMetricsRecord): void {
+    void getRedisClient()
+      .then((redis) => Promise.all([
+        redis.lPush(cacheKey, JSON.stringify(metric)),
+        redis.lTrim(cacheKey, 0, 999)
+      ]))
+      .catch((error) => {
+        logger.warn('Failed to persist LLM metrics to Redis', { cacheKey, error });
+      });
+  }
 
   recordMetrics(config: {
     model: string;
@@ -244,7 +275,7 @@ class LLMMetrics {
     costUSD: number;
     errorCount?: number;
     cacheHits?: number;
-  }): LLMMetrics {
+  }): LLMMetricsRecord {
     const avgLatency = config.latencies.length > 0
       ? config.latencies.reduce((a, b) => a + b, 0) / config.latencies.length
       : 0;
@@ -257,7 +288,7 @@ class LLMMetrics {
       ? (config.cacheHits || 0) / config.requestCount
       : 0;
 
-    const metric: LLMMetrics = {
+    const metric: LLMMetricsRecord = {
       model: config.model,
       timestamp: Date.now(),
       requestCount: config.requestCount,
@@ -271,8 +302,7 @@ class LLMMetrics {
     this.metrics.push(metric);
 
     const cacheKey = `sanliurfa:llm-metrics:${config.model}`;
-    redis.lpush(cacheKey, JSON.stringify(metric));
-    redis.ltrim(cacheKey, 0, 999);
+    this.persistMetric(cacheKey, metric);
 
     logger.info('LLM metrics recorded', {
       model: config.model,
@@ -327,7 +357,7 @@ class LLMMetrics {
       .sort((a, b) => a.time - b.time);
   }
 
-  getMetrics(model: string, limit: number = 100): LLMMetrics[] {
+  getMetrics(model: string, limit: number = 100): LLMMetricsRecord[] {
     return this.metrics
       .filter(m => m.model === model)
       .slice(-limit);
@@ -367,7 +397,11 @@ class QualityMonitor {
     this.alerts.push(alert);
 
     const cacheKey = `sanliurfa:alert:${alert.id}`;
-    redis.setex(cacheKey, 86400, JSON.stringify(alert));
+    void getRedisClient()
+      .then((redis) => redis.setEx(cacheKey, 86400, JSON.stringify(alert)))
+      .catch((error) => {
+        logger.warn('Failed to persist quality alert to Redis', { cacheKey, error });
+      });
 
     logger.warn('Quality alert triggered', {
       type: metricType,
@@ -421,7 +455,7 @@ class QualityMonitor {
 
 export const embeddingAnalytics = new EmbeddingAnalytics();
 export const retrievalAnalytics = new RetrievalAnalytics();
-export const llmMetrics = new LLMMetrics();
+export const llmMetrics = new LLMMetricsMonitor();
 export const qualityMonitor = new QualityMonitor();
 
-export { EmbeddingMetrics, RetrievalMetrics, LLMMetrics, QualityAlert };
+export type { EmbeddingMetrics, RetrievalMetrics, LLMMetricsRecord as LLMMetrics, QualityAlert };

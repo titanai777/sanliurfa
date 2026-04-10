@@ -1,0 +1,357 @@
+---
+import Layout from '../../layouts/Layout.astro';
+
+const user = Astro.locals.user;
+if (!user || !Astro.locals.isAdmin) {
+  return Astro.redirect('/giris?redirect=/admin/integrations');
+}
+
+const seo = {
+  title: 'Entegrasyon Ayarları - Admin',
+  description: 'Email ve analytics entegrasyon anahtarlarını yönet.',
+  noindex: true
+};
+---
+
+<Layout seo={seo}>
+  <div class="min-h-screen bg-gray-50 dark:bg-gray-900 py-8">
+    <div class="container-custom max-w-3xl">
+      <div class="mb-8">
+        <h1 class="text-2xl font-bold text-gray-900 dark:text-white">Entegrasyon Ayarları</h1>
+        <p class="text-gray-600 dark:text-gray-400 mt-2">
+          Buradan girilen değerler env boşsa otomatik olarak runtime'da kullanılacaktır.
+        </p>
+      </div>
+
+      <div class="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-6 space-y-6">
+        <section class="space-y-3">
+          <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Mevcut Durum</h2>
+          <div id="status-box" class="text-sm text-gray-600 dark:text-gray-300">
+            Yükleniyor...
+          </div>
+          <div id="verification-box" class="text-sm text-gray-600 dark:text-gray-300">
+            Canlı doğrulama bekleniyor...
+          </div>
+          <button
+            id="refresh-verification"
+            class="px-4 py-2 bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 text-sm font-medium"
+          >
+            Canlı Doğrulama Yap
+          </button>
+        </section>
+
+        <section class="space-y-4">
+          <h2 class="text-lg font-semibold text-gray-900 dark:text-white">RESEND API Anahtarı</h2>
+          <input
+            id="resendApiKey"
+            type="password"
+            autocomplete="off"
+            placeholder="re_..."
+            class="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+          />
+          <p class="text-xs text-gray-500 dark:text-gray-400">Format: <code>re_...</code></p>
+          <p id="resend-error" class="text-sm text-red-600 dark:text-red-400 min-h-[1.25rem]"></p>
+          <div class="flex flex-wrap gap-2">
+            <button
+              id="save-resend"
+              class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
+            >
+              RESEND Anahtarını Kaydet
+            </button>
+            <button
+              id="clear-resend"
+              class="px-4 py-2 bg-gray-200 text-gray-900 rounded-lg hover:bg-gray-300 text-sm font-medium dark:bg-gray-700 dark:text-gray-100 dark:hover:bg-gray-600"
+            >
+              RESEND Ayarını Temizle
+            </button>
+          </div>
+        </section>
+
+        <section class="space-y-4">
+          <h2 class="text-lg font-semibold text-gray-900 dark:text-white">Google Analytics ID</h2>
+          <input
+            id="analyticsId"
+            type="text"
+            autocomplete="off"
+            placeholder="G-XXXXXXXXXX"
+            class="w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-900 dark:text-white"
+          />
+          <p class="text-xs text-gray-500 dark:text-gray-400">Format: <code>G-XXXXXXXXXX</code></p>
+          <p id="analytics-error" class="text-sm text-red-600 dark:text-red-400 min-h-[1.25rem]"></p>
+          <div class="flex flex-wrap gap-2">
+            <button
+              id="save-analytics"
+              class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 text-sm font-medium"
+            >
+              Analytics ID Kaydet
+            </button>
+            <button
+              id="clear-analytics"
+              class="px-4 py-2 bg-gray-200 text-gray-900 rounded-lg hover:bg-gray-300 text-sm font-medium dark:bg-gray-700 dark:text-gray-100 dark:hover:bg-gray-600"
+            >
+              Analytics Ayarını Temizle
+            </button>
+          </div>
+        </section>
+
+        <p id="message-box" class="text-sm"></p>
+      </div>
+    </div>
+  </div>
+
+  <script is:inline>
+    const statusBox = document.getElementById('status-box');
+    const messageBox = document.getElementById('message-box');
+    const verificationBox = document.getElementById('verification-box');
+    const resendInput = document.getElementById('resendApiKey');
+    const analyticsInput = document.getElementById('analyticsId');
+    const resendButton = document.getElementById('save-resend');
+    const analyticsButton = document.getElementById('save-analytics');
+    const clearResendButton = document.getElementById('clear-resend');
+    const clearAnalyticsButton = document.getElementById('clear-analytics');
+    const refreshVerificationButton = document.getElementById('refresh-verification');
+    const resendError = document.getElementById('resend-error');
+    const analyticsError = document.getElementById('analytics-error');
+    const actionButtons = [resendButton, analyticsButton, clearResendButton, clearAnalyticsButton, refreshVerificationButton];
+    const resendPattern = /^re_[a-z0-9]+$/i;
+    const analyticsPattern = /^G-[A-Z0-9]+$/;
+
+    function formatStatus(name, payload) {
+      const state = payload.configured ? 'hazır' : 'eksik';
+      const value = payload.configured ? payload.maskedValue : 'boş';
+      return `${name}: ${state} (${payload.source}) • ${value}`;
+    }
+
+    function renderVerification(verification) {
+      if (!verificationBox) {
+        return;
+      }
+
+      if (!verification) {
+        verificationBox.innerHTML = '<div>Canlı doğrulama henüz çalıştırılmadı.</div>';
+        return;
+      }
+
+      const summary = verification.summary?.healthy ? 'healthy' : 'degraded';
+      verificationBox.innerHTML = `
+        <div class="space-y-1">
+          <div>Genel durum: ${summary} • ${verification.summary?.checkedAt || 'bilinmiyor'}</div>
+          <div>RESEND: ${verification.resend?.status || 'unknown'} • ${verification.resend?.message || 'Mesaj yok'}</div>
+          <div>Analytics: ${verification.analytics?.status || 'unknown'} • ${verification.analytics?.message || 'Mesaj yok'}</div>
+        </div>
+      `;
+    }
+
+    async function loadStatus(includeVerification = false) {
+      const endpoint = includeVerification
+        ? '/api/admin/system/integration-settings?includeVerification=1'
+        : '/api/admin/system/integration-settings';
+      const response = await fetch(endpoint);
+      const payload = await response.json();
+      if (!response.ok || !payload?.data) {
+        throw new Error(payload?.error?.message || 'Ayarlar yüklenemedi');
+      }
+
+      const resend = payload.data.resend;
+      const analytics = payload.data.analytics;
+      statusBox.innerHTML = `
+        <div class="space-y-1">
+          <div>${formatStatus('RESEND', resend)}</div>
+          <div>${formatStatus('Analytics', analytics)}</div>
+        </div>
+      `;
+      renderVerification(payload.data.verification);
+    }
+
+    function clearFieldErrors() {
+      if (resendError) resendError.textContent = '';
+      if (analyticsError) analyticsError.textContent = '';
+    }
+
+    function setFieldError(field, message) {
+      if (field === 'resendApiKey' && resendError) {
+        resendError.textContent = message;
+      }
+      if (field === 'analyticsId' && analyticsError) {
+        analyticsError.textContent = message;
+      }
+    }
+
+    function setLoadingState(isLoading) {
+      actionButtons.forEach((button) => {
+        if (!button) return;
+        button.disabled = isLoading;
+        if (isLoading) {
+          button.classList.add('opacity-60', 'cursor-not-allowed');
+        } else {
+          button.classList.remove('opacity-60', 'cursor-not-allowed');
+        }
+      });
+    }
+
+    function validateInput(field, value) {
+      if (!value) {
+        return `${field === 'resendApiKey' ? 'RESEND API anahtarı' : 'Analytics ID'} boş olamaz`;
+      }
+
+      if (field === 'resendApiKey' && !resendPattern.test(value)) {
+        return 'Geçersiz RESEND formatı. Örnek: re_abc123';
+      }
+
+      if (field === 'analyticsId' && !analyticsPattern.test(value)) {
+        return 'Geçersiz Analytics ID formatı. Örnek: G-ABC123XYZ';
+      }
+
+      return null;
+    }
+
+    function normalizeAnalyticsInput(value) {
+      if (!value) {
+        return '';
+      }
+
+      const trimmed = value.trim();
+      if (!trimmed) {
+        return '';
+      }
+
+      if (/^g-/i.test(trimmed)) {
+        return `G-${trimmed.slice(2).toUpperCase()}`;
+      }
+
+      return trimmed.toUpperCase();
+    }
+
+    function setMessage(text, isError = false) {
+      messageBox.textContent = text;
+      messageBox.className = isError
+        ? 'text-sm text-red-600 dark:text-red-400'
+        : 'text-sm text-green-600 dark:text-green-400';
+    }
+
+    function applyServerValidationMessage(payload, message, result) {
+      const field = result?.error?.details?.field;
+      if (field === 'resendApiKey' || field === 'analyticsId') {
+        setFieldError(field, message);
+        return;
+      }
+
+      if ('resendApiKey' in payload) {
+        setFieldError('resendApiKey', message);
+        return;
+      }
+      if ('analyticsId' in payload) {
+        setFieldError('analyticsId', message);
+      }
+    }
+
+    async function save(payload) {
+      clearFieldErrors();
+      setLoadingState(true);
+      try {
+        const response = await fetch('/api/admin/system/integration-settings', {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(payload)
+        });
+
+        let result = null;
+        try {
+          result = await response.json();
+        } catch {
+          result = null;
+        }
+
+        if (!response.ok) {
+          const message = result?.error?.message || 'Kayıt başarısız';
+          if (response.status === 422) {
+            applyServerValidationMessage(payload, message, result);
+          }
+          throw new Error(message);
+        }
+
+        await loadStatus();
+        setMessage('Ayar kaydedildi. Runtime cache yenilendi.');
+      } finally {
+        setLoadingState(false);
+      }
+    }
+
+    resendButton?.addEventListener('click', async () => {
+      try {
+        clearFieldErrors();
+        const resendApiKey = resendInput?.value?.trim();
+        const validationError = validateInput('resendApiKey', resendApiKey);
+        if (validationError) {
+          setFieldError('resendApiKey', validationError);
+          setMessage(validationError, true);
+          return;
+        }
+        await save({ resendApiKey });
+        resendInput.value = '';
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : String(error), true);
+      }
+    });
+
+    analyticsButton?.addEventListener('click', async () => {
+      try {
+        clearFieldErrors();
+        const analyticsId = normalizeAnalyticsInput(analyticsInput?.value);
+        if (analyticsInput) {
+          analyticsInput.value = analyticsId;
+        }
+        const validationError = validateInput('analyticsId', analyticsId);
+        if (validationError) {
+          setFieldError('analyticsId', validationError);
+          setMessage(validationError, true);
+          return;
+        }
+        await save({ analyticsId });
+        analyticsInput.value = '';
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : String(error), true);
+      }
+    });
+
+    clearResendButton?.addEventListener('click', async () => {
+      try {
+        clearFieldErrors();
+        await save({ resendApiKey: '' });
+        resendInput.value = '';
+        setMessage('RESEND ayarı temizlendi.');
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : String(error), true);
+      }
+    });
+
+    clearAnalyticsButton?.addEventListener('click', async () => {
+      try {
+        clearFieldErrors();
+        await save({ analyticsId: '' });
+        analyticsInput.value = '';
+        setMessage('Analytics ayarı temizlendi.');
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : String(error), true);
+      }
+    });
+
+    refreshVerificationButton?.addEventListener('click', async () => {
+      try {
+        setLoadingState(true);
+        await loadStatus(true);
+        setMessage('Canlı doğrulama tamamlandı.');
+      } catch (error) {
+        setMessage(error instanceof Error ? error.message : String(error), true);
+      } finally {
+        setLoadingState(false);
+      }
+    });
+
+    loadStatus().catch((error) => {
+      setMessage(error instanceof Error ? error.message : String(error), true);
+    });
+  </script>
+</Layout>
